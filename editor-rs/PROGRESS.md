@@ -1,16 +1,32 @@
 # editor-rs — progress
 
-**Stage 1 (base editor): essentially complete.** This document records what is
-done, what is intentionally deferred, and the benchmark results.
+Goal: a VS Code-style editor in **Rust** that is faster than VS Code (low typing
+latency, instant start, huge files, many windows cheaply) **without losing VS
+Code extension compatibility**.
+
+**Stages 1–4 have a working, tested vertical slice.** Stage 1 (base editor) is
+essentially complete; Stages 2–4 (LSP, VS Code assets, extension host) are
+functional foundations with honest coverage notes below. This document records
+what is done, what is deferred, and the benchmark results.
+
+## Status at a glance
+
+| Stage | Crate(s) | State |
+|-------|----------|-------|
+| 1 — base editor | `editor-core`, `editor-fs`, `editor-syntax`, `editor-ui`, `gpui-frontend` | Complete (UI shell builds on a GPU machine) |
+| 2 — LSP client | `editor-lsp` (+ `editor-rpc`) | Working: lifecycle, sync, completion/definition/hover, diagnostics |
+| 3 — VS Code assets | `editor-vscode` | Working: themes, snippets, language-config, keybindings |
+| 4 — extension host | `editor-ext` | Working vertical slice: loads/activates real extensions, core `vscode.*` API |
 
 ## Done
 
 ### Workspace
-- Independent Cargo workspace under `editor-rs/` (resolver 2), four core crates
+- Independent Cargo workspace under `editor-rs/` (resolver 2), eight crates
   + a release profile tuned for the editor (thin LTO, 1 codegen unit).
 - Builds, tests and lints clean on a headless machine:
   - `cargo build --release` — OK
-  - `cargo test` — **91 tests pass** (core 44, fs 11, syntax 7, ui 29)
+  - `cargo test` — **~132 tests pass** (core 44, fs 11, syntax 7, ui 29,
+    rpc 3, lsp 9, vscode 17, ext 10, + doctests)
   - `cargo clippy --all-targets` — **no warnings**
 - Runs on Linux/macOS/Windows (pure Rust, portable deps). README documents
   build/run for all three.
@@ -98,18 +114,78 @@ typing path.
 The parallel `ignore` walker + `grep` searcher scans 100k files for a literal
 in ~0.2 s on 4 cores, streaming results as they are found.
 
-## Deferred / not in Stage 1
+## Stage 2 — LSP client (`editor-lsp`, `editor-rpc`)
+- JSON-RPC base protocol (`editor-rpc`): `Content-Length` framing, a reader
+  thread, request/response matching; shared with the extension host.
+- Lifecycle: `initialize`/`initialized`/`shutdown`, **position-encoding
+  negotiation** (prefers UTF-8, falls back to UTF-16/32), sync-kind detection.
+- Document sync from the `Change` stream: incremental edits are replayed against
+  the last-synced rope to produce correct pre-edit ranges in the negotiated
+  encoding (non-ASCII handled), or full sync when the server asks.
+- Requests: completion, definition, hover. `pump()` drains `publishDiagnostics`
+  into `editor_core` diagnostics and answers common server→client requests.
+- Tested against an in-process mock server over real OS pipes.
+- **Not yet:** spawning/managing real servers per language from the UI,
+  semantic tokens, code actions, rename, signature help, workspace symbols.
+
+## Stage 3 — VS Code assets (`editor-vscode`)
+- Color **themes**: `colors` + TextMate `tokenColors`, resolved to our
+  tree-sitter highlight names via longest-prefix scope matching. Validated
+  against this repo's real `dark_vs.json`.
+- **Snippets**: VS Code snippet files + a snippet-body expander (`$1`,
+  `${1:default}`, `$0`) producing text + ordered tab-stops. Parsed real VS Code
+  snippet files.
+- **language-configuration.json**: comments, brackets, auto-closing/surrounding
+  pairs. Validated against the real Rust config.
+- **keybindings**: VS Code `keybindings.json` is already the format the
+  `editor-ui` keymap parses; a JSONC helper is provided.
+- All loaders accept JSONC (comments + trailing commas).
+- **Not yet:** applying a loaded theme end-to-end in the GPUI shell; TextMate
+  grammar *tokenisation* (we tokenise with tree-sitter instead and only read
+  TextMate *themes*); `include`-based theme inheritance; semantic token colors.
+
+## Stage 4 — extension host (`editor-ext`)
+- Runs extensions in **Node.js** (where they expect to run) and bridges to the
+  editor over JSON-RPC, mirroring VS Code's own process architecture.
+- `manifest`: parse `package.json` + `contributes` + `activationEvents`.
+- `vsix`: install a `.vsix` (zip, zip-slip-guarded); Open VSX URL builders.
+- `host` + `js/host.js`: spawn Node, inject a `vscode` module via a `require()`
+  hook, load and **activate real CommonJS extensions**, run their commands, and
+  service `vscode.*` calls through a `HostHandler` the editor implements.
+- Implemented `vscode` surface: `commands` (register/execute/getCommands),
+  `window` (show*Message, showQuickPick, showInputBox, OutputChannel, status
+  bar, progress stubs), `workspace` (getConfiguration, events, file watcher
+  stubs), `languages` (provider registration, diagnostic collections),
+  `Uri`/`Position`/`Range`/`Selection`/`Location`, `EventEmitter`/`Disposable`,
+  `CompletionItem`/`SnippetString`/`MarkdownString`/`Hover`/`Diagnostic`, the
+  common enums, and the activation `context` (subscriptions, mementos, secrets,
+  storage URIs). Proven end-to-end: activate → registerCommand → executeCommand
+  → showInformationMessage → result, plus routing unknown commands to built-ins.
+
+### Extension-compatibility coverage (be realistic)
+This is a **working foundation, not full parity**. Simple and medium extensions
+that register commands, show UI, read configuration and contribute languages/
+themes/snippets will activate and run. Not yet implemented (extensions using
+these will hit no-op stubs or need work): live `TextDocument`/`TextEditor`
+editing APIs wired to the buffer, calling registered completion/hover/definition
+providers from the editor, webviews, debug adapter protocol, tasks, the
+`workspace.fs` filesystem API, the testing API, notebooks, synchronous
+`getConfiguration().get` backed by real settings, and ESM-only extensions.
+Reaching broad compatibility is incremental along this same architecture.
+
+## Deferred / environment notes
 - The GPUI shell is not compiled by the headless CI here (no GPU/display). Its
   element-builder calls target the pinned Zed rev and may need minor updates
-  when the pin is bumped; the architecture is fixed.
-- Rendering niceties (scrolling virtualization beyond the first viewport,
-  minimap, inline diagnostics UI) are left for later stages.
+  when the pin is bumped; the architecture is fixed. The loaded VS Code theme is
+  not yet applied in the shell.
 - A real OS clipboard implementation is provided via the `Clipboard` trait seam
   but not wired to a system backend in the headless build.
 
-## Next stages
-2. LSP client (completion, go-to-definition, diagnostics) against the existing
-   `editor_core::interface` traits.
-3. VS Code themes, TextMate grammars, snippets and keybindings loaded
-   declaratively.
-4. Node.js extension host over JSON-RPC implementing `vscode.*` (Open VSX).
+## Suggested next steps
+- Wire the pieces together in the GPUI event loop: drive `editor-lsp` per
+  language on a worker, apply an `editor-vscode` theme to the editor view, and
+  surface the extension host's registered commands in the command palette.
+- Grow the `vscode` API surface document-editing first (it unlocks the most
+  extensions), backed by `editor-core` `Document`s over the host protocol.
+- Add an Open VSX HTTP download path (behind an optional feature) so `.vsix`
+  installs end-to-end from the marketplace.

@@ -3,18 +3,20 @@
 A VS Code-style code editor written in Rust, built for **speed**: minimal
 typing latency, instant startup, huge files without stalls, low memory use.
 
-> Status: **Stage 1 — base editor.** The editing engine, file system layer,
-> incremental syntax highlighting and the front-end-agnostic UI logic are
-> complete, tested and benchmarked. The GPUI window is provided as a separate
-> `gpui-frontend` crate (see below). See [`PROGRESS.md`](PROGRESS.md) for what's
-> done, what's next, and benchmark results.
+> Status: **Stages 1–4 have a working, tested vertical slice** — base editor,
+> LSP client, VS Code asset loading, and a Node.js extension host that loads and
+> activates real VS Code extensions. Goal: be faster than VS Code **without
+> losing extension compatibility**. The GPUI window is a separate
+> `gpui-frontend` crate (see below). See [`PROGRESS.md`](PROGRESS.md) for exact
+> coverage (including honest extension-compat limits) and benchmark results.
 
 ## Architecture
 
-editor-rs is a Cargo workspace of four core crates plus a separate GPUI shell.
-The guiding rule is that **nothing on the typing path may block** — parsing,
-search and disk I/O all happen off the keystroke path — and that **all logic is
-testable without a GPU or display**.
+editor-rs is a Cargo workspace of native-Rust crates plus a separate GPUI
+shell. The guiding rules: **nothing on the typing path may block** (parsing,
+search, I/O, LSP and extensions all run off the keystroke path), **all logic is
+testable without a GPU or display**, and the editor **reuses VS Code's own
+formats and runs VS Code's own extensions** rather than inventing new ones.
 
 ```
 editor-rs/
@@ -22,6 +24,10 @@ editor-rs/
 │   ├── editor-core      text buffer, editing, selections, undo/redo  (no UI deps)
 │   ├── editor-fs        file tree, file watching, project search
 │   ├── editor-syntax    incremental tree-sitter parsing + highlighting
+│   ├── editor-rpc       shared JSON-RPC base protocol
+│   ├── editor-lsp       Language Server Protocol client
+│   ├── editor-vscode    load VS Code themes / snippets / lang-config / keybindings
+│   ├── editor-ext       VS Code extension host (Node.js + vscode.* shim)
 │   └── editor-ui        keymap, command palette, tabs, workspace model + CLI
 └── gpui-frontend/       the GPUI desktop window (excluded from the workspace)
 ```
@@ -31,7 +37,11 @@ editor-rs/
 | `editor-core` | Rope-backed buffer, multi-cursor selections, grouped undo/redo, editing & movement commands, LSP/extension interfaces | [`ropey`] |
 | `editor-fs` | Lazy `.gitignore`-aware file tree, `notify` watcher, parallel project search | [`ignore`], [`grep`], [`notify`] |
 | `editor-syntax` | Incremental reparse from the change stream, viewport highlighting | [`tree-sitter`] (+ Rust/TS/JSON/Python grammars) |
-| `editor-ui` | JSON keybindings (with chords + `when`), fuzzy command palette, tabs, the `Workspace` brain, and a headless CLI | the three crates above, `serde` |
+| `editor-rpc` | `Content-Length` JSON-RPC framing + request/response matching | `serde_json`, `crossbeam-channel` |
+| `editor-lsp` | LSP client: lifecycle, encoding negotiation, incremental sync, completion/definition/hover, diagnostics | [`lsp-types`], `editor-rpc` |
+| `editor-vscode` | Load VS Code color themes, snippets, `language-configuration.json`, keybindings (JSONC) | `serde_json` |
+| `editor-ext` | VS Code extension host: spawn Node, `vscode.*` shim, load/activate extensions, VSIX/Open VSX | `editor-rpc`, [`zip`] |
+| `editor-ui` | JSON keybindings (with chords + `when`), fuzzy command palette, tabs, the `Workspace` brain, and a headless CLI | the editor crates above, `serde` |
 
 Data flows one way on each keystroke:
 
@@ -104,35 +114,45 @@ cargo run --release -- src/main.rs     # open a file
 On Linux you'll need the Vulkan loader/drivers and the usual X11/Wayland
 development libraries installed.
 
-## Features in Stage 1
+## What works today
 
-- **Editing**: insert, newline with indentation, backspace, forward/word/line
-  delete; cursor movement by char, word, line (incl. smart-home) and document;
-  vertical movement with a sticky goal column.
-- **Multi-cursor**: add cursors above/below, column-consistent multi-cursor
-  edits applied in a single pass, atomic multi-cursor undo.
-- **Undo/redo**: grouped, invertible transactions with keystroke coalescing.
-- **Clipboard**: cut/copy/paste with line-mode and multi-cursor distribution.
-- **Files**: open folder with a lazy, `.gitignore`-aware tree; file watching;
-  open/save documents with dirty tracking.
-- **Search**: parallel, cancellable project search (literal/regex/whole-word,
-  globs, result caps) over the ripgrep crates.
-- **Syntax**: incremental tree-sitter parsing for Rust, TypeScript/TSX, JSON
-  and Python; viewport syntax highlighting.
-- **Command palette & keybindings**: fuzzy command palette; JSON keybindings
-  with chords and `when`-clause contexts, user overrides.
+**Stage 1 — editing**
+- Insert, newline with indentation, backspace, forward/word/line delete; cursor
+  movement by char, word, line (incl. smart-home) and document; sticky vertical
+  goal column.
+- Multi-cursor: add cursors above/below, column-consistent single-pass edits,
+  atomic multi-cursor undo. Grouped undo/redo with keystroke coalescing.
+- Cut/copy/paste with line-mode and multi-cursor distribution.
+- Files: lazy `.gitignore`-aware tree, file watching, open/save + dirty tracking.
+- Search: parallel, cancellable project search (literal/regex/whole-word, globs,
+  caps) over the ripgrep crates.
+- Syntax: incremental tree-sitter parsing for Rust, TypeScript/TSX, JSON, Python.
+- Fuzzy command palette; JSON keybindings with chords + `when` contexts.
 
-## Later stages (planned)
+**Stage 2 — LSP client** — lifecycle + position-encoding negotiation,
+incremental document sync from the change stream, completion/definition/hover,
+and diagnostics.
 
-2. LSP client: completion, go-to-definition, diagnostics (interfaces already
-   defined in `editor_core::interface`).
-3. VS Code themes, TextMate grammars, snippets and keybindings read
-   declaratively from JSON/TextMate.
-4. A Node.js extension host over JSON-RPC implementing the `vscode.*` API
-   (Open VSX marketplace).
+**Stage 3 — VS Code assets** — load VS Code color themes (mapped to our
+highlight names), snippet files (with a tab-stop expander),
+`language-configuration.json`, and `keybindings.json`. Validated against this
+repo's real VS Code assets.
+
+**Stage 4 — extension host** — spawn Node.js, inject a `vscode` module shim,
+and **load/activate real VS Code extensions**, run the commands they register,
+and service their `vscode.*` calls back in the editor. Install from `.vsix`;
+Open VSX URL builders included.
+
+> Extension compatibility is a **working foundation, not full parity yet** —
+> simple-to-medium extensions (commands, UI, configuration, static
+> contributions) activate and run; heavier APIs (live document editing,
+> webviews, debug, tasks, FS) are stubbed. [`PROGRESS.md`](PROGRESS.md) lists
+> exactly what is and isn't covered, and the next steps.
 
 [`ropey`]: https://crates.io/crates/ropey
 [`ignore`]: https://crates.io/crates/ignore
 [`grep`]: https://crates.io/crates/grep
 [`notify`]: https://crates.io/crates/notify
 [`tree-sitter`]: https://crates.io/crates/tree-sitter
+[`lsp-types`]: https://crates.io/crates/lsp-types
+[`zip`]: https://crates.io/crates/zip
