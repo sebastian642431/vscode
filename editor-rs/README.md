@@ -51,7 +51,7 @@ ever rescanning the document.
 
 ## Build & run
 
-Requires a recent stable Rust toolchain (1.80+). The same commands work on
+Requires a recent stable Rust toolchain (1.87+). The same commands work on
 **Linux, macOS and Windows**.
 
 ```bash

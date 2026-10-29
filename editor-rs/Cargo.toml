@@ -4,6 +4,7 @@ members = [
     "crates/editor-core",
     "crates/editor-fs",
     "crates/editor-syntax",
+    "crates/editor-lsp",
     "crates/editor-ui",
 ]
 
@@ -15,6 +16,7 @@ default-members = [
     "crates/editor-core",
     "crates/editor-fs",
     "crates/editor-syntax",
+    "crates/editor-lsp",
     "crates/editor-ui",
 ]
 
@@ -27,7 +29,8 @@ exclude = ["gpui-frontend"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.87 for std::io::pipe, used to test the LSP client over in-memory pipes.
+rust-version = "1.87"
 license = "MIT"
 authors = ["editor-rs contributors"]
 repository = "https://github.com/sebastian642431/vscode"
@@ -59,6 +62,9 @@ crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Language Server Protocol types
+lsp-types = "0.97"
+
 # Benchmarks
 criterion = "0.5"
 
@@ -66,6 +72,7 @@ criterion = "0.5"
 editor-core = { path = "crates/editor-core" }
 editor-fs = { path = "crates/editor-fs" }
 editor-syntax = { path = "crates/editor-syntax" }
+editor-lsp = { path = "crates/editor-lsp" }
 
 [profile.release]
 opt-level = 3
