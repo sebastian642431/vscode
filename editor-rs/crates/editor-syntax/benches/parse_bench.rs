@@ -34,31 +34,24 @@ fn bench_full_parse(c: &mut Criterion) {
 
 fn bench_incremental_reparse(c: &mut Criterion) {
     // The hot path: a parsed large file, then one character typed in the
-    // middle. This should be orders of magnitude faster than a full parse.
+    // middle. The document and tree are built ONCE; each iteration types a
+    // single char and reparses incrementally. This must be far faster than a
+    // full parse and roughly independent of total file size.
     let mut group = c.benchmark_group("tree_sitter_incremental_reparse");
     for kb in [64usize, 512, 4096] {
         let src = rust_source(kb * 1024);
-        group.throughput(Throughput::Bytes(1)); // one char changed
+        group.throughput(Throughput::Elements(1)); // one char changed
         group.bench_with_input(BenchmarkId::from_parameter(format!("{kb}KB")), &src, |b, src| {
-            b.iter_batched(
-                || {
-                    let mut doc = Document::from_str(src);
-                    let mut st = SyntaxTree::new(Language::Rust);
-                    st.set_text(src);
-                    // Position a caret inside a function body near the middle.
-                    let mid_line = doc.buffer().len_lines() / 2;
-                    doc.set_caret(Point::new(mid_line, 0));
-                    (doc, st)
-                },
-                |(mut doc, mut st)| {
-                    doc.insert("x");
-                    let changes = doc.drain_changes();
-                    let rope = doc.buffer().rope().clone();
-                    st.edit(&doc.text(), &rope, &changes);
-                    criterion::black_box(st.tree().unwrap().root_node().end_byte());
-                },
-                criterion::BatchSize::SmallInput,
-            );
+            let mut doc = Document::from_str(src);
+            let mut st = SyntaxTree::new(Language::Rust);
+            st.set_rope(doc.buffer().rope());
+            doc.set_caret(Point::new(doc.buffer().len_lines() / 2, 5));
+            b.iter(|| {
+                doc.insert("x");
+                let changes = doc.drain_changes();
+                st.edit(doc.buffer().rope(), &changes);
+                criterion::black_box(st.tree().unwrap().root_node().end_byte());
+            });
         });
     }
     group.finish();

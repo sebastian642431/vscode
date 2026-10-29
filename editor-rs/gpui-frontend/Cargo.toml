@@ -1,0 +1,23 @@
+[package]
+name = "gpui-frontend"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "GPUI rendering shell for editor-rs. Requires a GPU/display and clones Zed; built separately from the core workspace."
+publish = false
+
+[[bin]]
+name = "editor-gui"
+path = "src/main.rs"
+
+[dependencies]
+editor-core = { path = "../crates/editor-core" }
+editor-fs = { path = "../crates/editor-fs" }
+editor-syntax = { path = "../crates/editor-syntax" }
+editor-ui = { path = "../crates/editor-ui" }
+
+# GPUI is pulled from Zed and pinned to a specific commit for reproducibility.
+# This is the (large) dependency that is deliberately kept OUT of the core
+# Cargo workspace: building it clones Zed and requires a GPU/display + the
+# platform graphics stack (Vulkan on Linux, Metal on macOS, DirectX on Windows).
+gpui = { git = "https://github.com/zed-industries/zed", rev = "e20d19d32f25734616243f15b7bfecefc633b8d7" }

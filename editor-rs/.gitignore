@@ -1,3 +1,4 @@
 /target
+gpui-frontend/target
 **/*.rs.bk
 Cargo.lock.bak

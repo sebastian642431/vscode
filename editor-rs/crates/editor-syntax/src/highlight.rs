@@ -99,29 +99,55 @@ impl SyntaxTree {
         self.tree.as_ref()
     }
 
-    /// Parse `text` from scratch, discarding any previous tree.
-    pub fn set_text(&mut self, text: &str) {
-        self.tree = self.parser.parse(text, None);
+    /// Parse a whole buffer from scratch, discarding any previous tree. Reads
+    /// the rope chunk-by-chunk, so even a 100 MB buffer is never copied into a
+    /// contiguous `String` just to parse it.
+    pub fn set_rope(&mut self, rope: &Rope) {
+        self.tree = parse_rope(&mut self.parser, rope, None);
     }
 
-    /// Apply `changes` incrementally and reparse. `new_text`/`new_rope` are the
-    /// buffer state *after* the changes were applied to it.
+    /// Convenience: parse from a string slice (one-time, e.g. a small test or
+    /// an in-memory buffer).
+    pub fn set_text(&mut self, text: &str) {
+        self.set_rope(&Rope::from_str(text));
+    }
+
+    /// Apply `changes` incrementally and reparse, reading the post-edit buffer
+    /// directly from `new_rope` (no `String` copy of the document).
     ///
     /// Byte offsets in the `InputEdit`s are exact; the `(row, column)` points
     /// are a best-effort hint (tree-sitter recomputes authoritative positions
     /// while parsing), with `column` measured in **bytes** as tree-sitter
     /// requires.
-    pub fn edit(&mut self, new_text: &str, new_rope: &Rope, changes: &[Change]) {
-        let Some(tree) = self.tree.as_mut() else {
+    pub fn edit(&mut self, new_rope: &Rope, changes: &[Change]) {
+        if self.tree.is_none() {
             // No prior tree: fall back to a full parse.
-            self.set_text(new_text);
+            self.set_rope(new_rope);
             return;
-        };
-        for change in changes {
-            tree.edit(&to_input_edit(change, new_rope));
         }
-        self.tree = self.parser.parse(new_text, self.tree.as_ref());
+        if let Some(tree) = self.tree.as_mut() {
+            for change in changes {
+                tree.edit(&to_input_edit(change, new_rope));
+            }
+        }
+        self.tree = parse_rope(&mut self.parser, new_rope, self.tree.as_ref());
     }
+}
+
+/// Parse a rope incrementally without materialising it, by feeding tree-sitter
+/// each chunk on demand. `old` is the previously-edited tree (or `None`).
+fn parse_rope(parser: &mut Parser, rope: &Rope, old: Option<&Tree>) -> Option<Tree> {
+    let len = rope.len_bytes();
+    parser.parse_with(
+        &mut |byte, _point| {
+            if byte >= len {
+                return &[] as &[u8];
+            }
+            let (chunk, chunk_start_byte, _, _) = rope.chunk_at_byte(byte);
+            &chunk.as_bytes()[byte - chunk_start_byte..]
+        },
+        old,
+    )
 }
 
 /// Convert an editor-core [`Change`] into a tree-sitter [`InputEdit`].
@@ -275,8 +301,7 @@ mod tests {
         doc.set_caret(editor_core::Point::new(0, 11)); // between { and }
         doc.insert(" let y = 2; ");
         let changes = doc.drain_changes();
-        let rope = doc.buffer().rope().clone();
-        st.edit(&doc.text(), &rope, &changes);
+        st.edit(doc.buffer().rope(), &changes);
 
         let tree = st.tree().unwrap();
         assert!(!tree.root_node().has_error());
