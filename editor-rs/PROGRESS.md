@@ -26,8 +26,9 @@ what is done, what is deferred, and the benchmark results.
   + a release profile tuned for the editor (thin LTO, 1 codegen unit).
 - Builds, tests and lints clean on a headless machine:
   - `cargo build --release` — OK
-  - `cargo test` — **~144 tests pass** (core 48, fs 11, syntax 7, ui 29,
-    rpc 3, lsp 9, vscode 17, ext 10, workbench 10, + doctests)
+  - `cargo test` — **~145 tests pass** (core 48, fs 11, syntax 7, ui 29,
+    rpc 3, lsp 9, vscode 17, ext 10, workbench 11, + doctests), including an
+    end-to-end `.vsix` install → activate → run capstone.
   - `cargo clippy --all-targets` — **no warnings**
 - Runs on Linux/macOS/Windows (pure Rust, portable deps). README documents
   build/run for all three.
