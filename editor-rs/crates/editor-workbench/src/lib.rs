@@ -71,6 +71,40 @@ fn char_to_utf16(rope: &Rope, char_off: usize) -> (u32, u32) {
     (line as u32, col as u32)
 }
 
+fn json_u32(v: &serde_json::Value, key: &str) -> u32 {
+    v.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as u32
+}
+
+/// Apply protocol range-edits (`{startLine,startCharacter,endLine,endCharacter,
+/// text}` JSON) to the document `uri` in `shared`. Returns the new
+/// `(version, text)` so the host mirror can be resynced.
+fn apply_json_edits(
+    shared: &mut Shared,
+    uri: &str,
+    edits: &[serde_json::Value],
+) -> Option<(i64, String)> {
+    let entry = shared.docs.get_mut(uri)?;
+    let rope = entry.document.buffer().rope().clone();
+    let mut char_edits: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|e| {
+            let a = utf16_to_char(&rope, json_u32(e, "startLine"), json_u32(e, "startCharacter"));
+            let b = utf16_to_char(&rope, json_u32(e, "endLine"), json_u32(e, "endCharacter"));
+            (
+                a.min(b),
+                a.max(b),
+                e.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    char_edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    for (start, end, text) in char_edits {
+        entry.document.edit(start..end, &text);
+    }
+    entry.version += 1;
+    Some((entry.version, entry.document.text()))
+}
+
 /// Map a VS Code `CompletionItemKind` number to our [`CompletionKind`].
 fn map_completion_kind(n: Option<i64>) -> CompletionKind {
     match n {
@@ -145,6 +179,10 @@ impl HostHandler for WorkbenchHandler {
     }
     fn log(&mut self, message: &str) {
         self.ui.lock().unwrap().log(message)
+    }
+
+    fn configuration_updated(&mut self, key: &str, value: &serde_json::Value) {
+        self.ui.lock().unwrap().configuration_updated(key, value)
     }
 
     fn publish_diagnostics(&mut self, owner: &str, uri: &str, diagnostics: &[DiagnosticInfo]) {
@@ -226,6 +264,13 @@ impl Workbench {
     pub fn set_active(&self, uri: &str) -> editor_rpc::Result<()> {
         self.shared.lock().unwrap().active = Some(uri.to_string());
         self.host.set_active_editor(Some(uri))
+    }
+
+    /// Push the merged workspace settings (e.g. the user's `settings.json`) to
+    /// the extension host so `workspace.getConfiguration(...).get(key)` works.
+    /// Call before activating extensions that read config at startup.
+    pub fn set_configuration(&self, settings: serde_json::Value) -> editor_rpc::Result<()> {
+        self.host.update_configuration(settings)
     }
 
     /// Apply an editor-side (user) edit to a document and resync the host.
@@ -340,5 +385,106 @@ impl Workbench {
             return Ok(Vec::new());
         };
         self.host.provide_definition(uri, line, character)
+    }
+
+    /// Apply a WorkspaceEdit (`{ "edits": { uri: [rangeEdit] } }` shape) to the
+    /// affected documents and resync their host mirrors. Returns whether
+    /// anything changed.
+    fn apply_workspace_edit(&self, we: &serde_json::Value) -> editor_rpc::Result<bool> {
+        let Some(map) = we.get("edits").and_then(|v| v.as_object()) else {
+            return Ok(false);
+        };
+        let mut changed: Vec<(String, i64, String)> = Vec::new();
+        {
+            let mut shared = self.shared.lock().unwrap();
+            for (uri, list) in map {
+                if let Some(arr) = list.as_array() {
+                    if let Some((version, text)) = apply_json_edits(&mut shared, uri, arr) {
+                        changed.push((uri.clone(), version, text));
+                    }
+                }
+            }
+        }
+        for (uri, version, text) in &changed {
+            self.host.change_document(uri, *version, text)?;
+        }
+        Ok(!changed.is_empty())
+    }
+
+    /// Run the extension's document formatter on `uri`, applying its edits to
+    /// the real buffer. Returns whether any edits were applied.
+    pub fn format_document(&self, uri: &str) -> editor_rpc::Result<bool> {
+        let edits = self.host.provide_formatting(uri)?;
+        if edits.is_empty() {
+            return Ok(false);
+        }
+        let synced = {
+            let mut shared = self.shared.lock().unwrap();
+            apply_json_edits(&mut shared, uri, &edits)
+        };
+        match synced {
+            Some((version, text)) => {
+                self.host.change_document(uri, version, &text)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Run the extension's rename at a char offset, applying the resulting
+    /// WorkspaceEdit across all affected documents.
+    pub fn rename_at(
+        &self,
+        uri: &str,
+        char_offset: usize,
+        new_name: &str,
+    ) -> editor_rpc::Result<bool> {
+        let Some((line, character)) = self.position_of(uri, char_offset) else {
+            return Ok(false);
+        };
+        match self.host.provide_rename(uri, line, character, new_name)? {
+            Some(we) => self.apply_workspace_edit(&we),
+            None => Ok(false),
+        }
+    }
+
+    /// Code actions offered over a char range (raw JSON: `{title, kind, edit?,
+    /// command?}`). Apply a chosen one with [`apply_code_action`](Self::apply_code_action).
+    pub fn code_actions_at(
+        &self,
+        uri: &str,
+        start_offset: usize,
+        end_offset: usize,
+    ) -> editor_rpc::Result<Vec<serde_json::Value>> {
+        let Some((sl, sc)) = self.position_of(uri, start_offset) else {
+            return Ok(Vec::new());
+        };
+        let Some((el, ec)) = self.position_of(uri, end_offset) else {
+            return Ok(Vec::new());
+        };
+        self.host.provide_code_actions(uri, sl, sc, el, ec)
+    }
+
+    /// Apply a code action: its WorkspaceEdit (if any) and/or its command.
+    pub fn apply_code_action(&self, action: &serde_json::Value) -> editor_rpc::Result<bool> {
+        let mut did = false;
+        if let Some(edit) = action.get("edit") {
+            did |= self.apply_workspace_edit(&serde_json::json!({ "edits": edit }))?;
+        }
+        if let Some(cmd) = action
+            .get("command")
+            .and_then(|c| c.get("command"))
+            .and_then(|v| v.as_str())
+        {
+            let args = action
+                .get("command")
+                .and_then(|c| c.get("arguments"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            self.host.execute_command(cmd, args)?;
+            did = true;
+        }
+        Ok(did)
     }
 }

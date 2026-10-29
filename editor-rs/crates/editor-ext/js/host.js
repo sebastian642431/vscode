@@ -141,6 +141,10 @@ function handleNotification(method, params) {
       activeEditorUri = params.uri || null;
       onDidChangeActiveEmitter.fire(activeEditorUri ? editorFor(activeEditorUri) : undefined);
       break;
+    case 'configuration.update':
+      settings = params.settings || {};
+      onDidChangeConfigEmitter.fire({ affectsConfiguration: () => true });
+      break;
   }
 }
 
@@ -156,6 +160,12 @@ async function handleRequest(method, params) {
       return provideHover(params);
     case 'provider.definition':
       return provideDefinition(params);
+    case 'provider.formatting':
+      return provideFormatting(params);
+    case 'provider.rename':
+      return provideRename(params);
+    case 'provider.codeAction':
+      return provideCodeActions(params);
     case 'deactivate':
       deactivateAll();
       return null;
@@ -280,12 +290,95 @@ async function provideDefinition(params) {
   return [];
 }
 
+function workspaceEditToMap(we) {
+  if (!we || !we._edits) return {};
+  const edits = {};
+  for (const [k, list] of we._edits) {
+    edits[k] = list.map((e) => rangeEditOf(e.range, e.text));
+  }
+  return edits;
+}
+
+async function provideFormatting(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return [];
+  const token = newToken();
+  const options = params.options || { tabSize: 4, insertSpaces: true };
+  for (const { selector, provider } of providers.formatting) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideDocumentFormattingEdits !== 'function') continue;
+    const res = await Promise.resolve(provider.provideDocumentFormattingEdits(doc, options, token));
+    if (res) return res.map((e) => rangeEditOf(e.range, e.newText != null ? e.newText : e.text || ''));
+  }
+  return [];
+}
+
+async function provideRename(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return null;
+  const pos = new Position(params.line, params.character);
+  const token = newToken();
+  for (const { selector, provider } of providers.rename) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideRenameEdits !== 'function') continue;
+    const we = await Promise.resolve(provider.provideRenameEdits(doc, pos, params.newName, token));
+    if (we && we._edits) return { edits: workspaceEditToMap(we) };
+  }
+  return null;
+}
+
+function normalizeCodeAction(a) {
+  const result = { title: a.title || '', kind: a.kind ? a.kind.value || String(a.kind) : null };
+  if (a.edit && a.edit._edits) result.edit = workspaceEditToMap(a.edit);
+  const cmd = typeof a.command === 'object' ? a.command : a.command ? { command: a.command } : null;
+  if (cmd) result.command = { command: cmd.command, arguments: cmd.arguments || [] };
+  if (a.isPreferred != null) result.isPreferred = !!a.isPreferred;
+  return result;
+}
+
+async function provideCodeActions(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return [];
+  const range = new Range(
+    new Position(params.startLine, params.startCharacter),
+    new Position(params.endLine, params.endCharacter)
+  );
+  const token = newToken();
+  const context = { diagnostics: [], only: undefined, triggerKind: 1 };
+  const out = [];
+  for (const { selector, provider } of providers.codeAction) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideCodeActions !== 'function') continue;
+    const res = await Promise.resolve(provider.provideCodeActions(doc, range, context, token));
+    if (!res) continue;
+    for (const a of res) out.push(normalizeCodeAction(a));
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- vscode shim
 const commandMap = new Map(); // id -> { cb, thisArg }
-const providers = { completion: [], hover: [], definition: [], codeAction: [] };
+const providers = {
+  completion: [],
+  hover: [],
+  definition: [],
+  codeAction: [],
+  formatting: [],
+  rename: [],
+};
 const activeExtensions = new Map(); // id -> { mod, ctx }
 const documents = new Map(); // uri -> TextDocument
 let activeEditorUri = null;
+let settings = {}; // merged workspace settings (nested object)
+
+function lookupSetting(dotted) {
+  let node = settings;
+  for (const part of dotted.split('.')) {
+    if (node == null || typeof node !== 'object') return undefined;
+    node = node[part];
+  }
+  return node;
+}
 
 function makeDisposable(fn) {
   return { dispose: typeof fn === 'function' ? fn : () => {} };
@@ -562,6 +655,38 @@ function diagnosticCollection(owner) {
   };
 }
 
+class WorkspaceEdit {
+  constructor() {
+    this._edits = new Map(); // uriString -> [{range, text}]
+  }
+  _key(u) {
+    return typeof u === 'string' ? u : u.toString();
+  }
+  _push(uri, e) {
+    const k = this._key(uri);
+    if (!this._edits.has(k)) this._edits.set(k, []);
+    this._edits.get(k).push(e);
+  }
+  replace(uri, range, text) {
+    this._push(uri, { range, text });
+  }
+  insert(uri, position, text) {
+    this._push(uri, { range: new Range(position, position), text });
+  }
+  delete(uri, range) {
+    this._push(uri, { range, text: '' });
+  }
+  set(uri, edits) {
+    this._edits.set(
+      this._key(uri),
+      (edits || []).map((e) => ({ range: e.range, text: e.newText != null ? e.newText : e.text || '' }))
+    );
+  }
+  get size() {
+    return this._edits.size;
+  }
+}
+
 class Uri {
   constructor(scheme, authority, p) {
     this.scheme = scheme || 'file';
@@ -603,6 +728,7 @@ const onDidOpenEmitter = new EventEmitter();
 const onDidChangeDocEmitter = new EventEmitter();
 const onDidCloseEmitter = new EventEmitter();
 const onDidChangeActiveEmitter = new EventEmitter();
+const onDidChangeConfigEmitter = new EventEmitter();
 
 function messageSender(level) {
   return function (message, ...rest) {
@@ -661,6 +787,7 @@ const vscode = {
   Range,
   Selection,
   Location,
+  WorkspaceEdit,
   EventEmitter,
   Disposable: Object.assign(
     function Disposable(fn) {
@@ -738,6 +865,30 @@ const vscode = {
       this.severity = severity === undefined ? 0 : severity;
     }
   },
+  CodeAction: class {
+    constructor(title, kind) {
+      this.title = title;
+      this.kind = kind;
+      this.edit = undefined;
+      this.command = undefined;
+      this.diagnostics = undefined;
+      this.isPreferred = undefined;
+    }
+  },
+  CodeActionKind: (() => {
+    const mk = (value) => ({ value, append: (p) => mk(value ? value + '.' + p : p) });
+    return {
+      Empty: mk(''),
+      QuickFix: mk('quickfix'),
+      Refactor: mk('refactor'),
+      RefactorExtract: mk('refactor.extract'),
+      RefactorInline: mk('refactor.inline'),
+      RefactorRewrite: mk('refactor.rewrite'),
+      Source: mk('source'),
+      SourceOrganizeImports: mk('source.organizeImports'),
+      SourceFixAll: mk('source.fixAll'),
+    };
+  })(),
   TextEdit: class {
     constructor(range, newText) {
       this.range = range;
@@ -856,23 +1007,32 @@ const vscode = {
       const prefix = section ? section + '.' : '';
       return {
         get(key, def) {
-          void prefix;
-          return def;
+          const v = lookupSetting(prefix + key);
+          return v === undefined ? def : v;
         },
-        has() {
-          return false;
+        has(key) {
+          return lookupSetting(prefix + key) !== undefined;
         },
         inspect() {
           return undefined;
         },
-        update() {
+        update(key, value) {
+          // Update the local mirror and tell the editor.
+          const path = (prefix + key).split('.');
+          let node = settings;
+          for (let i = 0; i < path.length - 1; i++) {
+            if (typeof node[path[i]] !== 'object' || node[path[i]] == null) node[path[i]] = {};
+            node = node[path[i]];
+          }
+          node[path[path.length - 1]] = value;
+          notifyRust('configuration.didUpdate', { key: prefix + key, value });
           return Promise.resolve();
         },
       };
     },
     getWorkspaceFolder: () => undefined,
     asRelativePath: (p) => (p && p.fsPath ? p.fsPath : String(p)),
-    onDidChangeConfiguration: new EventEmitter().event,
+    onDidChangeConfiguration: onDidChangeConfigEmitter.event,
     onDidOpenTextDocument: onDidOpenEmitter.event,
     onDidCloseTextDocument: onDidCloseEmitter.event,
     onDidChangeTextDocument: onDidChangeDocEmitter.event,
@@ -886,7 +1046,24 @@ const vscode = {
     }),
     registerTextDocumentContentProvider: () => makeDisposable(),
     openTextDocument: () => Promise.resolve(undefined),
-    applyEdit: () => Promise.resolve(true),
+    applyEdit(we) {
+      if (!we || !we._edits) return Promise.resolve(false);
+      const edits = {};
+      for (const [k, list] of we._edits) {
+        edits[k] = list.map((e) => rangeEditOf(e.range, e.text));
+      }
+      return requestRust('workspace.applyEdit', { edits }).then((res) => {
+        if (res && res.applied) {
+          const docs = res.documents || {};
+          for (const uri of Object.keys(docs)) {
+            const doc = documents.get(uri);
+            if (doc) doc._reset(docs[uri].version, docs[uri].text);
+          }
+          return true;
+        }
+        return false;
+      });
+    },
   },
 
   languages: {
@@ -906,7 +1083,14 @@ const vscode = {
       providers.codeAction.push({ selector, provider });
       return makeDisposable();
     },
-    registerDocumentFormattingEditProvider: () => makeDisposable(),
+    registerDocumentFormattingEditProvider(selector, provider) {
+      providers.formatting.push({ selector, provider });
+      return makeDisposable();
+    },
+    registerRenameProvider(selector, provider) {
+      providers.rename.push({ selector, provider });
+      return makeDisposable();
+    },
     createDiagnosticCollection: (name) => diagnosticCollection(name || 'default'),
     setLanguageConfiguration: () => makeDisposable(),
   },

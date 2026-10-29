@@ -26,8 +26,8 @@ what is done, what is deferred, and the benchmark results.
   + a release profile tuned for the editor (thin LTO, 1 codegen unit).
 - Builds, tests and lints clean on a headless machine:
   - `cargo build --release` — OK
-  - `cargo test` — **~145 tests pass** (core 48, fs 11, syntax 7, ui 29,
-    rpc 3, lsp 9, vscode 17, ext 10, workbench 11, + doctests), including an
+  - `cargo test` — **~150 tests pass** (core 48, fs 11, syntax 7, ui 29,
+    rpc 3, lsp 9, vscode 17, ext 10, workbench 16, + doctests), including an
     end-to-end `.vsix` install → activate → run capstone.
   - `cargo clippy --all-targets` — **no warnings**
 - Runs on Linux/macOS/Windows (pure Rust, portable deps). README documents
@@ -190,13 +190,16 @@ providers (`languages.register*Provider`) via the workbench and gets results
 mapped to the editor-core model. **Reactive extensions** work: a
 `DiagnosticCollection` (linters) surfaces diagnostics to the editor, and
 `workspace.onDidOpen/Change/CloseTextDocument` and
-`window.onDidChangeActiveTextEditor` fire as documents sync. Not yet implemented
-(extensions using these hit no-op stubs or need work): `WorkspaceEdit` across
-files, code actions / formatting / rename providers (registered but not yet
-invoked), webviews, debug adapter protocol, tasks, the `workspace.fs` filesystem
-API, the testing API, notebooks, synchronous `getConfiguration().get` backed by
-real settings, and ESM-only extensions. Reaching broad compatibility is
-incremental along this same architecture.
+`window.onDidChangeActiveTextEditor` fire as documents sync. **Settings** work:
+the editor pushes merged workspace settings and `getConfiguration(section).get/
+has` answer synchronously (with `update` + `onDidChangeConfiguration`).
+**Refactoring/editing providers** work and apply to the real buffer:
+`WorkspaceEdit` + `workspace.applyEdit` (multi-file), document **formatting**,
+**rename**, and **code actions** (edit and/or command). Not yet implemented
+(extensions using these hit no-op stubs or need work): webviews, debug adapter
+protocol, tasks, the `workspace.fs` filesystem API, the testing API, notebooks,
+tree views, status-bar/decoration rendering, and ESM-only extensions. Reaching
+broad compatibility is incremental along this same architecture.
 
 ## Deferred / environment notes
 - The GPUI shell is not compiled by the headless CI here (no GPU/display). Its

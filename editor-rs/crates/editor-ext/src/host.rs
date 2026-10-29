@@ -111,6 +111,11 @@ pub trait HostHandler: Send {
         let _ = (owner, uri, diagnostics);
     }
 
+    /// An extension changed a setting via `config.update(key, value)`.
+    fn configuration_updated(&mut self, key: &str, value: &serde_json::Value) {
+        let _ = (key, value);
+    }
+
     /// `TextEditor.edit` / `workspace.applyEdit`: apply `edits` to the document
     /// identified by `uri` and return the edited document's new full text and
     /// version so the Node mirror can resync. Return `None` if the document is
@@ -118,6 +123,18 @@ pub trait HostHandler: Send {
     fn apply_edits(&mut self, uri: &str, edits: &[RangeEdit]) -> Option<EditOutcome> {
         let _ = (uri, edits);
         None
+    }
+
+    /// `workspace.applyEdit`: apply edits to several documents at once. Return
+    /// the new text/version of each document that changed.
+    fn apply_workspace_edits(
+        &mut self,
+        edits: &[(String, Vec<RangeEdit>)],
+    ) -> Vec<(String, EditOutcome)> {
+        edits
+            .iter()
+            .filter_map(|(uri, es)| self.apply_edits(uri, es).map(|o| (uri.clone(), o)))
+            .collect()
     }
 }
 
@@ -272,6 +289,13 @@ impl ExtensionHost {
             .notify("editor.setActive", json!({ "uri": uri }))
     }
 
+    /// Push the merged workspace settings to the host so extensions'
+    /// `workspace.getConfiguration(...).get(key)` answers synchronously.
+    pub fn update_configuration(&self, settings: Value) -> editor_rpc::Result<()> {
+        self.conn
+            .notify("configuration.update", json!({ "settings": settings }))
+    }
+
     // ----- language features provided by extensions --------------------------
 
     /// Ask the extension's registered completion providers for items at a
@@ -315,6 +339,55 @@ impl ExtensionHost {
         let result = self.conn.request(
             "provider.definition",
             json!({ "uri": uri, "line": line, "character": character }),
+            self.timeout,
+        )?;
+        Ok(result.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Ask the extension's document-formatting providers for edits (as
+    /// `{startLine, startCharacter, endLine, endCharacter, text}` objects).
+    pub fn provide_formatting(&self, uri: &str) -> editor_rpc::Result<Vec<Value>> {
+        let result = self.conn.request(
+            "provider.formatting",
+            json!({ "uri": uri, "options": { "tabSize": 4, "insertSpaces": true } }),
+            self.timeout,
+        )?;
+        Ok(result.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Ask the extension's rename providers for the WorkspaceEdit to apply.
+    /// Returns the `{ edits: { uri: [rangeEdit] } }` object, or `None`.
+    pub fn provide_rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> editor_rpc::Result<Option<Value>> {
+        let result = self.conn.request(
+            "provider.rename",
+            json!({ "uri": uri, "line": line, "character": character, "newName": new_name }),
+            self.timeout,
+        )?;
+        Ok(if result.is_null() { None } else { Some(result) })
+    }
+
+    /// Ask the extension's code-action providers for actions over a range.
+    pub fn provide_code_actions(
+        &self,
+        uri: &str,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+    ) -> editor_rpc::Result<Vec<Value>> {
+        let result = self.conn.request(
+            "provider.codeAction",
+            json!({
+                "uri": uri,
+                "startLine": start_line, "startCharacter": start_character,
+                "endLine": end_line, "endCharacter": end_character,
+            }),
             self.timeout,
         )?;
         Ok(result.as_array().cloned().unwrap_or_default())
@@ -409,6 +482,24 @@ fn dispatch_request(
                 None => json!({ "applied": false }),
             }
         }
+        "workspace.applyEdit" => {
+            // params.edits is { uri: [rangeEdit, ...], ... }
+            let mut per_doc: Vec<(String, Vec<RangeEdit>)> = Vec::new();
+            if let Some(obj) = params.get("edits").and_then(Value::as_object) {
+                for (uri, list) in obj {
+                    per_doc.push((uri.clone(), parse_edits(Some(list))));
+                }
+            }
+            let outcomes = h.apply_workspace_edits(&per_doc);
+            let mut documents = serde_json::Map::new();
+            for (uri, outcome) in &outcomes {
+                documents.insert(
+                    uri.clone(),
+                    json!({ "version": outcome.version, "text": outcome.text }),
+                );
+            }
+            json!({ "applied": !outcomes.is_empty(), "documents": documents })
+        }
         _ => Value::Null,
     }
 }
@@ -452,6 +543,11 @@ fn dispatch_notification(handler: &Arc<Mutex<dyn HostHandler>>, method: &str, pa
             let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
             let diags = parse_diagnostics(params.get("diagnostics"));
             h.publish_diagnostics(owner, uri, &diags);
+        }
+        "configuration.didUpdate" => {
+            let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+            let value = params.get("value").cloned().unwrap_or(Value::Null);
+            h.configuration_updated(key, &value);
         }
         _ => {}
     }
