@@ -1,0 +1,37 @@
+[
+  { "key": "ctrl+shift+p", "command": "workbench.action.showCommands" },
+  { "key": "ctrl+p", "command": "workbench.action.quickOpen" },
+  { "key": "ctrl+shift+f", "command": "workbench.action.findInFiles" },
+  { "key": "ctrl+f", "command": "actions.find", "when": "editorFocus" },
+  { "key": "ctrl+b", "command": "workbench.action.toggleSidebar" },
+  { "key": "ctrl+s", "command": "workbench.action.files.save", "when": "editorFocus" },
+  { "key": "ctrl+w", "command": "workbench.action.closeActiveEditor" },
+  { "key": "ctrl+tab", "command": "workbench.action.nextEditor" },
+  { "key": "ctrl+shift+tab", "command": "workbench.action.previousEditor" },
+
+  { "key": "ctrl+z", "command": "undo", "when": "editorFocus" },
+  { "key": "ctrl+y", "command": "redo", "when": "editorFocus" },
+  { "key": "ctrl+shift+z", "command": "redo", "when": "editorFocus" },
+  { "key": "ctrl+x", "command": "editor.action.clipboardCutAction", "when": "editorFocus" },
+  { "key": "ctrl+c", "command": "editor.action.clipboardCopyAction", "when": "editorFocus" },
+  { "key": "ctrl+v", "command": "editor.action.clipboardPasteAction", "when": "editorFocus" },
+  { "key": "ctrl+a", "command": "editor.action.selectAll", "when": "editorFocus" },
+
+  { "key": "ctrl+left", "command": "cursorWordLeft", "when": "editorFocus" },
+  { "key": "ctrl+right", "command": "cursorWordRight", "when": "editorFocus" },
+  { "key": "ctrl+shift+left", "command": "cursorWordLeftSelect", "when": "editorFocus" },
+  { "key": "ctrl+shift+right", "command": "cursorWordRightSelect", "when": "editorFocus" },
+  { "key": "home", "command": "cursorHome", "when": "editorFocus" },
+  { "key": "end", "command": "cursorEnd", "when": "editorFocus" },
+  { "key": "ctrl+home", "command": "cursorTop", "when": "editorFocus" },
+  { "key": "ctrl+end", "command": "cursorBottom", "when": "editorFocus" },
+
+  { "key": "alt+shift+down", "command": "editor.action.insertCursorBelow", "when": "editorFocus" },
+  { "key": "alt+shift+up", "command": "editor.action.insertCursorAbove", "when": "editorFocus" },
+
+  { "key": "ctrl+backspace", "command": "deleteWordLeft", "when": "editorFocus" },
+  { "key": "ctrl+delete", "command": "deleteWordRight", "when": "editorFocus" },
+
+  { "key": "ctrl+k ctrl+s", "command": "workbench.action.openGlobalKeybindings" },
+  { "key": "escape", "command": "workbench.action.closeQuickOpen", "when": "paletteOpen" }
+]

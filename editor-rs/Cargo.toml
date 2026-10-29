@@ -18,6 +18,12 @@ default-members = [
     "crates/editor-ui",
 ]
 
+# The GPUI rendering shell lives in its own crate, excluded from the workspace
+# so that a normal `cargo build` never has to clone the (large) Zed git
+# repository that provides GPUI. Build it explicitly from its own directory on
+# a machine with a GPU/display — see gpui-frontend/README.md.
+exclude = ["gpui-frontend"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

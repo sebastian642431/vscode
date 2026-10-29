@@ -2,6 +2,22 @@
 name = "editor-ui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Front-end-agnostic UI logic for editor-rs: keymap, command palette, tabs and the workspace model. The GPUI rendering shell lives in ../../gpui-frontend."
 
 [dependencies]
+editor-core.workspace = true
+editor-fs.workspace = true
+editor-syntax.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "editor"
+path = "src/bin/editor.rs"

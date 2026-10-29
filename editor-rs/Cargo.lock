@@ -254,6 +254,14 @@ dependencies = [
 [[package]]
 name = "editor-ui"
 version = "0.1.0"
+dependencies = [
+ "editor-core",
+ "editor-fs",
+ "editor-syntax",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "either"
