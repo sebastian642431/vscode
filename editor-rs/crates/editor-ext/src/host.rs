@@ -1,0 +1,295 @@
+//! The Rust side of the extension host: spawn Node, speak JSON-RPC, and
+//! service the `vscode.*` API calls the extension makes.
+//!
+//! ```text
+//!   editor-rs (Rust)                     Node.js (host.js + vscode shim)
+//!   ─────────────────                    ───────────────────────────────
+//!   activate(ext)         ── request ─▶  require(ext.main); ext.activate(ctx)
+//!                                        ctx.subscriptions, registerCommand…
+//!   HostHandler.show_msg  ◀─ request ──  vscode.window.showInformationMessage
+//!   executeCommand(id)    ── request ─▶  invoke the registered callback
+//! ```
+//!
+//! The editor implements [`HostHandler`] to back the API; a request from the
+//! extension (e.g. showing a message) is dispatched to it on the pump thread
+//! and the result is returned to Node, so the extension's `await` resolves.
+
+use std::io;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use editor_rpc::{Connection, Incoming};
+use serde_json::{json, Value};
+
+use crate::manifest::ExtensionManifest;
+use crate::vsix::InstalledExtension;
+
+/// The embedded Node host bootstrap + `vscode` shim.
+const HOST_JS: &str = include_str!("../js/host.js");
+
+static HOST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Severity of a `window.show*Message` call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MessageLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+/// What the editor must provide so the extension's `vscode.*` calls do
+/// something. Every method has a no-op default, so a minimal editor only
+/// implements what it supports. Called on the host's pump thread.
+pub trait HostHandler: Send {
+    /// `window.showInformationMessage` / `showWarningMessage` /
+    /// `showErrorMessage`. Return the chosen item, or `None`.
+    fn show_message(
+        &mut self,
+        level: MessageLevel,
+        message: &str,
+        items: &[String],
+    ) -> Option<String> {
+        let _ = (level, message, items);
+        None
+    }
+
+    /// `window.showQuickPick`. Return the chosen item, or `None`.
+    fn quick_pick(&mut self, items: &[String]) -> Option<String> {
+        let _ = items;
+        None
+    }
+
+    /// `window.showInputBox`. Return the entered text, or `None`.
+    fn input_box(&mut self, prompt: Option<&str>, value: Option<&str>) -> Option<String> {
+        let _ = (prompt, value);
+        None
+    }
+
+    /// `workspace.getConfiguration(section)`. Return the settings object.
+    fn get_configuration(&mut self, section: &str) -> Value {
+        let _ = section;
+        json!({})
+    }
+
+    /// Notified when the extension calls `commands.registerCommand(id, …)`.
+    fn command_registered(&mut self, id: &str) {
+        let _ = id;
+    }
+
+    /// `commands.executeCommand(id, …args)` for a command the extension host
+    /// doesn't own (a built-in). Return its result.
+    fn execute_builtin(&mut self, command: &str, args: &[Value]) -> Value {
+        let _ = (command, args);
+        Value::Null
+    }
+
+    /// A `console.log`/`OutputChannel` line from the extension.
+    fn log(&mut self, message: &str) {
+        let _ = message;
+    }
+}
+
+/// A no-op handler (useful as a base or for headless runs).
+#[derive(Default)]
+pub struct NullHandler;
+impl HostHandler for NullHandler {}
+
+/// A running Node.js extension host.
+pub struct ExtensionHost {
+    conn: Arc<Connection>,
+    child: Option<Child>,
+    host_js_path: PathBuf,
+    timeout: Duration,
+    _pump: JoinHandle<()>,
+}
+
+impl ExtensionHost {
+    /// Spawn the host, using the `node` binary on `PATH` (override with the
+    /// `EDITOR_RS_NODE` environment variable). `handler` backs the `vscode.*`
+    /// API.
+    pub fn spawn(handler: Arc<Mutex<dyn HostHandler>>) -> io::Result<ExtensionHost> {
+        let node = std::env::var("EDITOR_RS_NODE").unwrap_or_else(|_| "node".to_string());
+        Self::spawn_with_node(&node, handler)
+    }
+
+    /// Spawn the host using a specific `node` binary.
+    pub fn spawn_with_node(
+        node: &str,
+        handler: Arc<Mutex<dyn HostHandler>>,
+    ) -> io::Result<ExtensionHost> {
+        // Materialise the bootstrap script next to the system temp dir.
+        let seq = HOST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let host_js_path = std::env::temp_dir()
+            .join(format!("editor-rs-exthost-{}-{}.js", std::process::id(), seq));
+        std::fs::write(&host_js_path, HOST_JS)?;
+
+        let mut child = Command::new(node)
+            .arg(&host_js_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+
+        let conn = Arc::new(Connection::new(stdout, stdin));
+        let pump = spawn_pump(Arc::clone(&conn), handler);
+
+        Ok(ExtensionHost {
+            conn,
+            child: Some(child),
+            host_js_path,
+            timeout: Duration::from_secs(20),
+            _pump: pump,
+        })
+    }
+
+    /// Load and activate an installed extension. Returns the host's activation
+    /// report (e.g. the list of commands the extension registered).
+    pub fn activate(&self, ext: &InstalledExtension) -> editor_rpc::Result<Value> {
+        self.activate_parts(&ext.root.to_string_lossy(), &ext.manifest)
+    }
+
+    /// Activate from an explicit root path + manifest (used by tests).
+    pub fn activate_parts(
+        &self,
+        extension_path: &str,
+        manifest: &ExtensionManifest,
+    ) -> editor_rpc::Result<Value> {
+        self.conn.request(
+            "activate",
+            json!({
+                "extensionPath": extension_path,
+                "main": manifest.main,
+                "id": manifest.id(),
+            }),
+            self.timeout,
+        )
+    }
+
+    /// Run a command the extension registered, returning its result.
+    pub fn execute_command(&self, command: &str, args: Vec<Value>) -> editor_rpc::Result<Value> {
+        self.conn.request(
+            "executeCommand",
+            json!({ "command": command, "args": args }),
+            self.timeout,
+        )
+    }
+
+    /// Ask the extension to deactivate (calls its `deactivate` export).
+    pub fn deactivate(&self) -> editor_rpc::Result<()> {
+        self.conn.notify("deactivate", Value::Null)
+    }
+}
+
+impl Drop for ExtensionHost {
+    fn drop(&mut self) {
+        let _ = self.conn.notify("shutdown", Value::Null);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.host_js_path);
+    }
+}
+
+/// Spawn the thread that services `vscode.*` calls coming from Node.
+fn spawn_pump(conn: Arc<Connection>, handler: Arc<Mutex<dyn HostHandler>>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(msg) = conn.incoming().recv() {
+            match msg {
+                Incoming::Request { id, method, params } => {
+                    let result = dispatch_request(&handler, &method, &params);
+                    let _ = conn.respond(id, result);
+                }
+                Incoming::Notification { method, params } => {
+                    dispatch_notification(&handler, &method, &params);
+                }
+            }
+        }
+    })
+}
+
+fn dispatch_request(
+    handler: &Arc<Mutex<dyn HostHandler>>,
+    method: &str,
+    params: &Value,
+) -> Value {
+    let mut h = handler.lock().unwrap();
+    match method {
+        "window.showMessage" => {
+            let level = match params.get("level").and_then(Value::as_str) {
+                Some("warning") => MessageLevel::Warning,
+                Some("error") => MessageLevel::Error,
+                _ => MessageLevel::Info,
+            };
+            let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+            let items = string_array(params.get("items"));
+            match h.show_message(level, message, &items) {
+                Some(choice) => Value::String(choice),
+                None => Value::Null,
+            }
+        }
+        "window.showQuickPick" => {
+            let items = string_array(params.get("items"));
+            match h.quick_pick(&items) {
+                Some(choice) => Value::String(choice),
+                None => Value::Null,
+            }
+        }
+        "window.showInputBox" => {
+            let prompt = params.get("prompt").and_then(Value::as_str);
+            let value = params.get("value").and_then(Value::as_str);
+            match h.input_box(prompt, value) {
+                Some(text) => Value::String(text),
+                None => Value::Null,
+            }
+        }
+        "workspace.getConfiguration" => {
+            let section = params.get("section").and_then(Value::as_str).unwrap_or("");
+            h.get_configuration(section)
+        }
+        "commands.executeCommand" => {
+            let command = params.get("command").and_then(Value::as_str).unwrap_or("");
+            let args = params
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            h.execute_builtin(command, &args)
+        }
+        _ => Value::Null,
+    }
+}
+
+fn dispatch_notification(handler: &Arc<Mutex<dyn HostHandler>>, method: &str, params: &Value) {
+    let mut h = handler.lock().unwrap();
+    match method {
+        "command.registered" => {
+            if let Some(id) = params.get("id").and_then(Value::as_str) {
+                h.command_registered(id);
+            }
+        }
+        "log" => {
+            if let Some(msg) = params.get("message").and_then(Value::as_str) {
+                h.log(msg);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}

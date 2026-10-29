@@ -1,0 +1,13 @@
+[package]
+name = "editor-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "JSON-RPC 2.0 base protocol (Content-Length framing + request/response matching) shared by editor-rs's LSP client and extension host."
+
+[dependencies]
+serde_json.workspace = true
+crossbeam-channel.workspace = true

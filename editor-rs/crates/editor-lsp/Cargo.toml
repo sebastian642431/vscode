@@ -10,6 +10,7 @@ description = "Language Server Protocol client for editor-rs: JSON-RPC over stdi
 
 [dependencies]
 editor-core.workspace = true
+editor-rpc.workspace = true
 ropey.workspace = true
 serde.workspace = true
 serde_json.workspace = true

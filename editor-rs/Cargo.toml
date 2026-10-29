@@ -2,10 +2,12 @@
 resolver = "2"
 members = [
     "crates/editor-core",
+    "crates/editor-rpc",
     "crates/editor-fs",
     "crates/editor-syntax",
     "crates/editor-lsp",
     "crates/editor-vscode",
+    "crates/editor-ext",
     "crates/editor-ui",
 ]
 
@@ -15,10 +17,12 @@ members = [
 # `editor-ui` logic build and test everywhere. See README.md and PROGRESS.md.
 default-members = [
     "crates/editor-core",
+    "crates/editor-rpc",
     "crates/editor-fs",
     "crates/editor-syntax",
     "crates/editor-lsp",
     "crates/editor-vscode",
+    "crates/editor-ext",
     "crates/editor-ui",
 ]
 
@@ -67,15 +71,20 @@ serde_json = "1"
 # Language Server Protocol types
 lsp-types = "0.97"
 
+# VSIX (zip) extraction for the extension host
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
 # Benchmarks
 criterion = "0.5"
 
 # Internal crates
 editor-core = { path = "crates/editor-core" }
+editor-rpc = { path = "crates/editor-rpc" }
 editor-fs = { path = "crates/editor-fs" }
 editor-syntax = { path = "crates/editor-syntax" }
 editor-lsp = { path = "crates/editor-lsp" }
 editor-vscode = { path = "crates/editor-vscode" }
+editor-ext = { path = "crates/editor-ext" }
 
 [profile.release]
 opt-level = 3
