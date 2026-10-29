@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use editor_core::interface::{Completion, CompletionKind};
 use editor_core::Document;
 use editor_ext::{EditOutcome, ExtensionHost, HostHandler, MessageLevel, RangeEdit};
 use ropey::Rope;
@@ -47,6 +48,32 @@ fn utf16_to_char(rope: &Rope, line: u32, character: u32) -> usize {
     let line_start_u16 = rope.char_to_utf16_cu(line_start);
     let target_u16 = (line_start_u16 + character as usize).min(rope.len_utf16_cu());
     rope.utf16_cu_to_char(target_u16)
+}
+
+/// Convert a char offset to a UTF-16 `(line, character)` position.
+fn char_to_utf16(rope: &Rope, char_off: usize) -> (u32, u32) {
+    let char_off = char_off.min(rope.len_chars());
+    let line = rope.char_to_line(char_off);
+    let line_start = rope.line_to_char(line);
+    let col = rope.char_to_utf16_cu(char_off) - rope.char_to_utf16_cu(line_start);
+    (line as u32, col as u32)
+}
+
+/// Map a VS Code `CompletionItemKind` number to our [`CompletionKind`].
+fn map_completion_kind(n: Option<i64>) -> CompletionKind {
+    match n {
+        Some(1) => CompletionKind::Method,
+        Some(2) => CompletionKind::Function,
+        Some(3) => CompletionKind::Method, // Constructor
+        Some(4) => CompletionKind::Field,
+        Some(5) => CompletionKind::Variable,
+        Some(6) => CompletionKind::Class,
+        Some(8) => CompletionKind::Module,
+        Some(13) => CompletionKind::Keyword,
+        Some(14) => CompletionKind::Snippet,
+        Some(0) => CompletionKind::Text,
+        _ => CompletionKind::Other,
+    }
 }
 
 /// The [`HostHandler`] the workbench installs: document edits hit the real
@@ -187,5 +214,74 @@ impl Workbench {
     /// Run a closure with shared read access (e.g. to read selections).
     pub fn with_shared<R>(&self, f: impl FnOnce(&Shared) -> R) -> R {
         f(&self.shared.lock().unwrap())
+    }
+
+    // ----- language features from extensions ---------------------------------
+
+    /// UTF-16 `(line, character)` of a char offset in document `uri`.
+    fn position_of(&self, uri: &str, char_offset: usize) -> Option<(u32, u32)> {
+        let shared = self.shared.lock().unwrap();
+        let entry = shared.docs.get(uri)?;
+        Some(char_to_utf16(entry.document.buffer().rope(), char_offset))
+    }
+
+    /// Completions from extension providers at a char offset, mapped to the
+    /// editor-core [`Completion`] model.
+    pub fn completion_at(
+        &self,
+        uri: &str,
+        char_offset: usize,
+    ) -> editor_rpc::Result<Vec<Completion>> {
+        let Some((line, character)) = self.position_of(uri, char_offset) else {
+            return Ok(Vec::new());
+        };
+        let items = self.host.provide_completion(uri, line, character)?;
+        Ok(items
+            .iter()
+            .map(|it| {
+                let label = it.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let insert_text = it
+                    .get("insertText")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&label)
+                    .to_string();
+                Completion {
+                    label,
+                    insert_text,
+                    detail: it.get("detail").and_then(|v| v.as_str()).map(str::to_string),
+                    kind: map_completion_kind(it.get("kind").and_then(|v| v.as_i64())),
+                }
+            })
+            .collect())
+    }
+
+    /// Hover text from extension providers at a char offset (contents joined).
+    pub fn hover_at(&self, uri: &str, char_offset: usize) -> editor_rpc::Result<Option<String>> {
+        let Some((line, character)) = self.position_of(uri, char_offset) else {
+            return Ok(None);
+        };
+        let hover = self.host.provide_hover(uri, line, character)?;
+        Ok(hover.and_then(|h| {
+            h.get("contents")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+        }))
+    }
+
+    /// Definition location(s) from extension providers at a char offset.
+    pub fn definition_at(
+        &self,
+        uri: &str,
+        char_offset: usize,
+    ) -> editor_rpc::Result<Vec<serde_json::Value>> {
+        let Some((line, character)) = self.position_of(uri, char_offset) else {
+            return Ok(Vec::new());
+        };
+        self.host.provide_definition(uri, line, character)
     }
 }

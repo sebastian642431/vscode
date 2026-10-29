@@ -140,12 +140,134 @@ async function handleRequest(method, params) {
       return activateExtension(params);
     case 'executeCommand':
       return runCommand(params.command, params.args || []);
+    case 'provider.completion':
+      return provideCompletion(params);
+    case 'provider.hover':
+      return provideHover(params);
+    case 'provider.definition':
+      return provideDefinition(params);
     case 'deactivate':
       deactivateAll();
       return null;
     default:
       return null;
   }
+}
+
+// --- invoking language-feature providers the extension registered ----------
+
+function selectorMatches(selector, doc) {
+  if (!selector) return true;
+  const arr = Array.isArray(selector) ? selector : [selector];
+  return arr.some((s) => {
+    if (typeof s === 'string') return s === '*' || s === doc.languageId;
+    if (s && typeof s === 'object') {
+      return !s.language || s.language === '*' || s.language === doc.languageId;
+    }
+    return false;
+  });
+}
+
+function newToken() {
+  return {
+    isCancellationRequested: false,
+    onCancellationRequested: new EventEmitter().event,
+  };
+}
+
+function mdToString(d) {
+  if (d == null) return null;
+  if (typeof d === 'string') return d;
+  if (typeof d.value === 'string') return d.value;
+  return null;
+}
+
+function normalizeCompletionItem(it) {
+  if (typeof it === 'string') return { label: it, insertText: it };
+  const label = typeof it.label === 'string' ? it.label : (it.label && it.label.label) || '';
+  let insertText = it.insertText;
+  let isSnippet = false;
+  if (insertText && typeof insertText === 'object' && 'value' in insertText) {
+    insertText = insertText.value;
+    isSnippet = true;
+  }
+  return {
+    label,
+    kind: typeof it.kind === 'number' ? it.kind : null,
+    detail: it.detail || null,
+    documentation: mdToString(it.documentation),
+    insertText: insertText != null ? String(insertText) : label,
+    isSnippet,
+    sortText: it.sortText || null,
+    filterText: it.filterText || null,
+  };
+}
+
+async function provideCompletion(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return [];
+  const pos = new Position(params.line, params.character);
+  const token = newToken();
+  const ctx = { triggerKind: 1, triggerCharacter: params.triggerCharacter };
+  const out = [];
+  for (const { selector, provider } of providers.completion) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideCompletionItems !== 'function') continue;
+    let res = await Promise.resolve(provider.provideCompletionItems(doc, pos, token, ctx));
+    if (!res) continue;
+    const items = Array.isArray(res) ? res : res.items || [];
+    for (const it of items) out.push(normalizeCompletionItem(it));
+  }
+  return out;
+}
+
+async function provideHover(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return null;
+  const pos = new Position(params.line, params.character);
+  const token = newToken();
+  for (const { selector, provider } of providers.hover) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideHover !== 'function') continue;
+    const res = await Promise.resolve(provider.provideHover(doc, pos, token));
+    if (!res) continue;
+    const contents = (Array.isArray(res.contents) ? res.contents : [res.contents])
+      .map(mdToString)
+      .filter((x) => x != null);
+    return { contents, range: res.range ? rangeEditOf(res.range, '') : null };
+  }
+  return null;
+}
+
+function normalizeLocation(loc) {
+  if (!loc) return null;
+  // Location | LocationLink
+  const uri = loc.uri || loc.targetUri;
+  const range = loc.range || loc.targetRange;
+  if (!uri || !range) return null;
+  return {
+    uri: typeof uri === 'string' ? uri : uri.toString(),
+    startLine: range.start.line,
+    startCharacter: range.start.character,
+    endLine: range.end.line,
+    endCharacter: range.end.character,
+  };
+}
+
+async function provideDefinition(params) {
+  const doc = documents.get(params.uri);
+  if (!doc) return [];
+  const pos = new Position(params.line, params.character);
+  const token = newToken();
+  for (const { selector, provider } of providers.definition) {
+    if (!selectorMatches(selector, doc)) continue;
+    if (typeof provider.provideDefinition !== 'function') continue;
+    const res = await Promise.resolve(provider.provideDefinition(doc, pos, token));
+    if (!res) continue;
+    const arr = Array.isArray(res) ? res : [res];
+    return arr.map(normalizeLocation).filter((x) => x != null);
+  }
+  return [];
 }
 
 // ---------------------------------------------------------------- vscode shim

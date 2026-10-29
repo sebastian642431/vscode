@@ -251,6 +251,54 @@ impl ExtensionHost {
         self.conn
             .notify("editor.setActive", json!({ "uri": uri }))
     }
+
+    // ----- language features provided by extensions --------------------------
+
+    /// Ask the extension's registered completion providers for items at a
+    /// `(line, character)` position (UTF-16 column). Returns normalised items.
+    pub fn provide_completion(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> editor_rpc::Result<Vec<Value>> {
+        let result = self.conn.request(
+            "provider.completion",
+            json!({ "uri": uri, "line": line, "character": character }),
+            self.timeout,
+        )?;
+        Ok(result.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Ask the extension's hover providers for hover info at a position.
+    pub fn provide_hover(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> editor_rpc::Result<Option<Value>> {
+        let result = self.conn.request(
+            "provider.hover",
+            json!({ "uri": uri, "line": line, "character": character }),
+            self.timeout,
+        )?;
+        Ok(if result.is_null() { None } else { Some(result) })
+    }
+
+    /// Ask the extension's definition providers for definition location(s).
+    pub fn provide_definition(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> editor_rpc::Result<Vec<Value>> {
+        let result = self.conn.request(
+            "provider.definition",
+            json!({ "uri": uri, "line": line, "character": character }),
+            self.timeout,
+        )?;
+        Ok(result.as_array().cloned().unwrap_or_default())
+    }
 }
 
 impl Drop for ExtensionHost {
