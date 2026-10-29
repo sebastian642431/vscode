@@ -1,0 +1,14 @@
+[package]
+name = "editor-vscode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VS Code asset compatibility for editor-rs: load VS Code color themes, snippets, language-configuration and keybindings declaratively from JSON."
+
+[dependencies]
+editor-syntax.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -5,6 +5,7 @@ members = [
     "crates/editor-fs",
     "crates/editor-syntax",
     "crates/editor-lsp",
+    "crates/editor-vscode",
     "crates/editor-ui",
 ]
 
@@ -17,6 +18,7 @@ default-members = [
     "crates/editor-fs",
     "crates/editor-syntax",
     "crates/editor-lsp",
+    "crates/editor-vscode",
     "crates/editor-ui",
 ]
 
@@ -73,6 +75,7 @@ editor-core = { path = "crates/editor-core" }
 editor-fs = { path = "crates/editor-fs" }
 editor-syntax = { path = "crates/editor-syntax" }
 editor-lsp = { path = "crates/editor-lsp" }
+editor-vscode = { path = "crates/editor-vscode" }
 
 [profile.release]
 opt-level = 3
