@@ -19,9 +19,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use editor_core::interface::{Completion, CompletionKind};
-use editor_core::Document;
-use editor_ext::{EditOutcome, ExtensionHost, HostHandler, MessageLevel, RangeEdit};
+use editor_core::interface::{
+    Completion, CompletionKind, Diagnostic, DiagnosticSeverity, TextRange,
+};
+use editor_core::{Document, Point};
+use editor_ext::{DiagnosticInfo, EditOutcome, ExtensionHost, HostHandler, MessageLevel, RangeEdit};
 use ropey::Rope;
 
 /// One open document in the workbench.
@@ -38,6 +40,8 @@ pub struct DocState {
 pub struct Shared {
     pub docs: HashMap<String, DocState>,
     pub active: Option<String>,
+    /// Latest diagnostics an extension published, keyed by document URI.
+    pub diagnostics: HashMap<String, Vec<Diagnostic>>,
 }
 
 /// Convert a UTF-16 `(line, character)` position (VS Code's unit) to a char
@@ -48,6 +52,14 @@ fn utf16_to_char(rope: &Rope, line: u32, character: u32) -> usize {
     let line_start_u16 = rope.char_to_utf16_cu(line_start);
     let target_u16 = (line_start_u16 + character as usize).min(rope.len_utf16_cu());
     rope.utf16_cu_to_char(target_u16)
+}
+
+/// Convert a UTF-16 `(line, character)` position to an editor-core [`Point`]
+/// (char column).
+fn utf16_to_point(rope: &Rope, line: u32, character: u32) -> Point {
+    let off = utf16_to_char(rope, line, character);
+    let l = rope.char_to_line(off);
+    Point::new(l, off - rope.line_to_char(l))
 }
 
 /// Convert a char offset to a UTF-16 `(line, character)` position.
@@ -134,6 +146,40 @@ impl HostHandler for WorkbenchHandler {
     fn log(&mut self, message: &str) {
         self.ui.lock().unwrap().log(message)
     }
+
+    fn publish_diagnostics(&mut self, owner: &str, uri: &str, diagnostics: &[DiagnosticInfo]) {
+        let mut shared = self.shared.lock().unwrap();
+        // Convert positions against the document's rope if we have it.
+        let rope = shared
+            .docs
+            .get(uri)
+            .map(|d| d.document.buffer().rope().clone())
+            .unwrap_or_default();
+        let converted: Vec<Diagnostic> = diagnostics
+            .iter()
+            .map(|d| Diagnostic {
+                range: TextRange::new(
+                    utf16_to_point(&rope, d.start_line, d.start_character),
+                    utf16_to_point(&rope, d.end_line, d.end_character),
+                ),
+                severity: match d.severity {
+                    1 => DiagnosticSeverity::Warning,
+                    2 => DiagnosticSeverity::Information,
+                    3 => DiagnosticSeverity::Hint,
+                    _ => DiagnosticSeverity::Error,
+                },
+                message: d.message.clone(),
+                source: d.source.clone(),
+            })
+            .collect();
+        if converted.is_empty() {
+            shared.diagnostics.remove(uri);
+        } else {
+            shared.diagnostics.insert(uri.to_string(), converted);
+        }
+        // Also let the embedder's UI react (e.g. draw the gutter).
+        self.ui.lock().unwrap().publish_diagnostics(owner, uri, diagnostics);
+    }
 }
 
 /// The editor session: documents + the extension host, wired together.
@@ -199,6 +245,17 @@ impl Workbench {
             (entry.version, entry.document.text())
         };
         self.host.change_document(uri, version, &full)
+    }
+
+    /// The latest diagnostics an extension published for `uri`.
+    pub fn diagnostics(&self, uri: &str) -> Vec<Diagnostic> {
+        self.shared
+            .lock()
+            .unwrap()
+            .diagnostics
+            .get(uri)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The current text of a document, if open.

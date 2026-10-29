@@ -26,8 +26,8 @@ what is done, what is deferred, and the benchmark results.
   + a release profile tuned for the editor (thin LTO, 1 codegen unit).
 - Builds, tests and lints clean on a headless machine:
   - `cargo build --release` — OK
-  - `cargo test` — **~142 tests pass** (core 48, fs 11, syntax 7, ui 29,
-    rpc 3, lsp 9, vscode 17, ext 10, workbench 8, + doctests)
+  - `cargo test` — **~144 tests pass** (core 48, fs 11, syntax 7, ui 29,
+    rpc 3, lsp 9, vscode 17, ext 10, workbench 10, + doctests)
   - `cargo clippy --all-targets` — **no warnings**
 - Runs on Linux/macOS/Windows (pure Rust, portable deps). README documents
   build/run for all three.
@@ -186,13 +186,16 @@ offsetAt/getWordRangeAtPosition), `TextEditor.edit`, `window.activeTextEditor`,
 and `workspace.textDocuments`/`openTextDocument`. **Language features** work
 too: the editor can invoke extension-registered completion / hover / definition
 providers (`languages.register*Provider`) via the workbench and gets results
-mapped to the editor-core model. Not yet implemented (extensions using these
-hit no-op stubs or need work): `WorkspaceEdit` across files, code actions /
-formatting / rename providers (registered but not yet invoked), webviews, debug
-adapter protocol, tasks, the `workspace.fs` filesystem API, the testing API,
-notebooks, synchronous `getConfiguration().get` backed by real settings, and
-ESM-only extensions. Reaching broad compatibility is incremental along this
-same architecture.
+mapped to the editor-core model. **Reactive extensions** work: a
+`DiagnosticCollection` (linters) surfaces diagnostics to the editor, and
+`workspace.onDidOpen/Change/CloseTextDocument` and
+`window.onDidChangeActiveTextEditor` fire as documents sync. Not yet implemented
+(extensions using these hit no-op stubs or need work): `WorkspaceEdit` across
+files, code actions / formatting / rename providers (registered but not yet
+invoked), webviews, debug adapter protocol, tasks, the `workspace.fs` filesystem
+API, the testing API, notebooks, synchronous `getConfiguration().get` backed by
+real settings, and ESM-only extensions. Reaching broad compatibility is
+incremental along this same architecture.
 
 ## Deferred / environment notes
 - The GPUI shell is not compiled by the headless CI here (no GPU/display). Its

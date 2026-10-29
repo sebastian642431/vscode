@@ -116,20 +116,30 @@ function handleNotification(method, params) {
     case 'deactivate':
       deactivateAll();
       break;
-    case 'document.open':
-      documents.set(params.uri, new TextDocument(params.uri, params.languageId, params.version, params.text));
-      break;
-    case 'document.change': {
-      const doc = documents.get(params.uri);
-      if (doc) doc._reset(params.version, params.text);
+    case 'document.open': {
+      const doc = new TextDocument(params.uri, params.languageId, params.version, params.text);
+      documents.set(params.uri, doc);
+      onDidOpenEmitter.fire(doc);
       break;
     }
-    case 'document.close':
+    case 'document.change': {
+      const doc = documents.get(params.uri);
+      if (doc) {
+        doc._reset(params.version, params.text);
+        onDidChangeDocEmitter.fire({ document: doc, contentChanges: [], reason: undefined });
+      }
+      break;
+    }
+    case 'document.close': {
+      const doc = documents.get(params.uri);
       documents.delete(params.uri);
       if (activeEditorUri === params.uri) activeEditorUri = null;
+      if (doc) onDidCloseEmitter.fire(doc);
       break;
+    }
     case 'editor.setActive':
       activeEditorUri = params.uri || null;
+      onDidChangeActiveEmitter.fire(activeEditorUri ? editorFor(activeEditorUri) : undefined);
       break;
   }
 }
@@ -489,6 +499,69 @@ function rangeEditOf(range, text) {
   };
 }
 
+function normalizeDiagnostic(d) {
+  const r = d.range || new Range(new Position(0, 0), new Position(0, 0));
+  return {
+    startLine: r.start.line,
+    startCharacter: r.start.character,
+    endLine: r.end.line,
+    endCharacter: r.end.character,
+    message: typeof d.message === 'string' ? d.message : mdToString(d.message) || '',
+    severity: typeof d.severity === 'number' ? d.severity : 0,
+    source: d.source || null,
+  };
+}
+
+// A DiagnosticCollection whose edits are forwarded to the editor.
+function diagnosticCollection(owner) {
+  const uriKey = (u) => (typeof u === 'string' ? u : u.toString());
+  const store = new Map();
+  const publish = (uri, diags) =>
+    notifyRust('diagnostics.publish', {
+      owner,
+      uri,
+      diagnostics: (diags || []).map(normalizeDiagnostic),
+    });
+  return {
+    name: owner,
+    set(uri, diags) {
+      // Overload: set(entries[]) or set(uri, diags).
+      if (Array.isArray(uri)) {
+        for (const [u, ds] of uri) {
+          const k = uriKey(u);
+          store.set(k, ds);
+          publish(k, ds);
+        }
+        return;
+      }
+      const k = uriKey(uri);
+      store.set(k, diags || []);
+      publish(k, diags || []);
+    },
+    delete(uri) {
+      const k = uriKey(uri);
+      store.delete(k);
+      publish(k, []);
+    },
+    clear() {
+      for (const k of store.keys()) publish(k, []);
+      store.clear();
+    },
+    get(uri) {
+      return store.get(uriKey(uri)) || [];
+    },
+    has(uri) {
+      return store.has(uriKey(uri));
+    },
+    forEach(cb) {
+      store.forEach((ds, k) => cb(Uri.parse(k), ds));
+    },
+    dispose() {
+      this.clear();
+    },
+  };
+}
+
 class Uri {
   constructor(scheme, authority, p) {
     this.scheme = scheme || 'file';
@@ -523,6 +596,13 @@ class Uri {
 function enumObj(obj) {
   return Object.freeze(obj);
 }
+
+// Named emitters so sync notifications from the editor can fire the events
+// extensions subscribe to.
+const onDidOpenEmitter = new EventEmitter();
+const onDidChangeDocEmitter = new EventEmitter();
+const onDidCloseEmitter = new EventEmitter();
+const onDidChangeActiveEmitter = new EventEmitter();
 
 function messageSender(level) {
   return function (message, ...rest) {
@@ -763,7 +843,7 @@ const vscode = {
     withProgress: (_opts, task) =>
       Promise.resolve(task({ report() {} }, { isCancellationRequested: false })),
     visibleTextEditors: [],
-    onDidChangeActiveTextEditor: new EventEmitter().event,
+    onDidChangeActiveTextEditor: onDidChangeActiveEmitter.event,
     onDidChangeTextEditorSelection: new EventEmitter().event,
     showTextDocument: () => Promise.resolve(undefined),
   },
@@ -793,9 +873,9 @@ const vscode = {
     getWorkspaceFolder: () => undefined,
     asRelativePath: (p) => (p && p.fsPath ? p.fsPath : String(p)),
     onDidChangeConfiguration: new EventEmitter().event,
-    onDidOpenTextDocument: new EventEmitter().event,
-    onDidCloseTextDocument: new EventEmitter().event,
-    onDidChangeTextDocument: new EventEmitter().event,
+    onDidOpenTextDocument: onDidOpenEmitter.event,
+    onDidCloseTextDocument: onDidCloseEmitter.event,
+    onDidChangeTextDocument: onDidChangeDocEmitter.event,
     onDidSaveTextDocument: new EventEmitter().event,
     onDidChangeWorkspaceFolders: new EventEmitter().event,
     createFileSystemWatcher: () => ({
@@ -827,14 +907,7 @@ const vscode = {
       return makeDisposable();
     },
     registerDocumentFormattingEditProvider: () => makeDisposable(),
-    createDiagnosticCollection: (name) => ({
-      name,
-      set() {},
-      delete() {},
-      clear() {},
-      dispose() {},
-      forEach() {},
-    }),
+    createDiagnosticCollection: (name) => diagnosticCollection(name || 'default'),
     setLanguageConfiguration: () => makeDisposable(),
   },
 

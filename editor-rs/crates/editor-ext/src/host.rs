@@ -105,6 +105,12 @@ pub trait HostHandler: Send {
         let _ = message;
     }
 
+    /// An extension published diagnostics for `uri` under `owner` (its
+    /// `DiagnosticCollection` name). An empty slice clears them.
+    fn publish_diagnostics(&mut self, owner: &str, uri: &str, diagnostics: &[DiagnosticInfo]) {
+        let _ = (owner, uri, diagnostics);
+    }
+
     /// `TextEditor.edit` / `workspace.applyEdit`: apply `edits` to the document
     /// identified by `uri` and return the edited document's new full text and
     /// version so the Node mirror can resync. Return `None` if the document is
@@ -120,6 +126,20 @@ pub trait HostHandler: Send {
 pub struct EditOutcome {
     pub version: i64,
     pub text: String,
+}
+
+/// A diagnostic an extension published via a `DiagnosticCollection`, in
+/// LSP-style `(line, character)` (UTF-16) positions.
+#[derive(Clone, Debug)]
+pub struct DiagnosticInfo {
+    pub start_line: u32,
+    pub start_character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+    pub message: String,
+    /// 0=Error, 1=Warning, 2=Information, 3=Hint (VS Code's numbering).
+    pub severity: u8,
+    pub source: Option<String>,
 }
 
 /// A no-op handler (useful as a base or for headless runs).
@@ -427,8 +447,33 @@ fn dispatch_notification(handler: &Arc<Mutex<dyn HostHandler>>, method: &str, pa
                 h.log(msg);
             }
         }
+        "diagnostics.publish" => {
+            let owner = params.get("owner").and_then(Value::as_str).unwrap_or("");
+            let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+            let diags = parse_diagnostics(params.get("diagnostics"));
+            h.publish_diagnostics(owner, uri, &diags);
+        }
         _ => {}
     }
+}
+
+fn parse_diagnostics(value: Option<&Value>) -> Vec<DiagnosticInfo> {
+    value
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|d| DiagnosticInfo {
+                    start_line: u32_at(d, "startLine"),
+                    start_character: u32_at(d, "startCharacter"),
+                    end_line: u32_at(d, "endLine"),
+                    end_character: u32_at(d, "endCharacter"),
+                    message: d.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
+                    severity: d.get("severity").and_then(Value::as_u64).unwrap_or(0) as u8,
+                    source: d.get("source").and_then(Value::as_str).map(str::to_string),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn string_array(value: Option<&Value>) -> Vec<String> {

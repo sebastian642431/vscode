@@ -33,6 +33,8 @@ pub mod host;
 pub mod manifest;
 pub mod vsix;
 
-pub use host::{EditOutcome, ExtensionHost, HostHandler, MessageLevel, NullHandler, RangeEdit};
+pub use host::{
+    DiagnosticInfo, EditOutcome, ExtensionHost, HostHandler, MessageLevel, NullHandler, RangeEdit,
+};
 pub use manifest::{Contributes, ExtensionManifest};
 pub use vsix::{install_vsix, open_installed, InstalledExtension};
