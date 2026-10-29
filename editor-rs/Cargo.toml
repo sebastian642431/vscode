@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/editor-core",
+    "crates/editor-fs",
+    "crates/editor-syntax",
+    "crates/editor-ui",
+]
+
+# The GPUI-backed desktop UI (`editor-ui` with `--features gpui`) is NOT part of
+# the default build set, because GPUI requires a GPU/Vulkan + display stack that
+# headless CI machines do not have. The three core crates plus the headless
+# `editor-ui` logic build and test everywhere. See README.md and PROGRESS.md.
+default-members = [
+    "crates/editor-core",
+    "crates/editor-fs",
+    "crates/editor-syntax",
+    "crates/editor-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["editor-rs contributors"]
+repository = "https://github.com/sebastian642431/vscode"
+
+[workspace.dependencies]
+# Core text storage
+ropey = "1.6"
+
+# Syntax (tree-sitter + grammars)
+tree-sitter = "0.24"
+tree-sitter-highlight = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-python = "0.23"
+
+# Filesystem
+notify = "6.1"
+notify-debouncer-full = "0.3"
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+
+# Concurrency / plumbing
+crossbeam-channel = "0.5"
+
+# Config / serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Benchmarks
+criterion = "0.5"
+
+# Internal crates
+editor-core = { path = "crates/editor-core" }
+editor-fs = { path = "crates/editor-fs" }
+editor-syntax = { path = "crates/editor-syntax" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
+# A profile tuned for the typing hot path during development: optimize
+# dependencies but keep fast incremental builds of our own crates.
+[profile.dev.package."*"]
+opt-level = 2

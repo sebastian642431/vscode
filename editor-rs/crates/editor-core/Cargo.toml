@@ -1,0 +1,19 @@
+[package]
+name = "editor-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "UI-independent text buffer, editing, selections, undo/redo and integration interfaces for editor-rs."
+
+[dependencies]
+ropey.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "buffer_bench"
+harness = false
