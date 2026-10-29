@@ -16,17 +16,18 @@ what is done, what is deferred, and the benchmark results.
 | 1 — base editor | `editor-core`, `editor-fs`, `editor-syntax`, `editor-ui`, `gpui-frontend` | Complete (UI shell builds on a GPU machine) |
 | 2 — LSP client | `editor-lsp` (+ `editor-rpc`) | Working: lifecycle, sync, completion/definition/hover, diagnostics |
 | 3 — VS Code assets | `editor-vscode` | Working: themes, snippets, language-config, keybindings |
-| 4 — extension host | `editor-ext` | Working vertical slice: loads/activates real extensions, core `vscode.*` API |
+| 4 — extension host | `editor-ext` | Working: loads/activates real extensions, core `vscode.*` API |
+| 4+ — integration | `editor-workbench` | Working: extensions read **and edit** real editor-core buffers via `TextDocument`/`TextEditor` |
 
 ## Done
 
 ### Workspace
-- Independent Cargo workspace under `editor-rs/` (resolver 2), eight crates
+- Independent Cargo workspace under `editor-rs/` (resolver 2), nine crates
   + a release profile tuned for the editor (thin LTO, 1 codegen unit).
 - Builds, tests and lints clean on a headless machine:
   - `cargo build --release` — OK
-  - `cargo test` — **~132 tests pass** (core 44, fs 11, syntax 7, ui 29,
-    rpc 3, lsp 9, vscode 17, ext 10, + doctests)
+  - `cargo test` — **~139 tests pass** (core 48, fs 11, syntax 7, ui 29,
+    rpc 3, lsp 9, vscode 17, ext 10, workbench 5, + doctests)
   - `cargo clippy --all-targets` — **no warnings**
 - Runs on Linux/macOS/Windows (pure Rust, portable deps). README documents
   build/run for all three.
@@ -162,16 +163,33 @@ in ~0.2 s on 4 cores, streaming results as they are found.
   storage URIs). Proven end-to-end: activate → registerCommand → executeCommand
   → showInformationMessage → result, plus routing unknown commands to built-ins.
 
+## Integration — `editor-workbench`
+Ties the document model and the extension host together:
+- Owns the open documents (editor-core `Document`s keyed by URI) and the host.
+- Mirrors documents into the host so `TextDocument` APIs answer synchronously.
+- Implements the host's document-editing API: `TextEditor.edit` applies to the
+  **real** editor-core buffer (undo + change stream), with correct
+  UTF-16↔char/byte conversion (tested with multi-byte text), then resyncs the
+  host mirror. User-side edits push back to the host too.
+- Delegates non-document API (messages, pickers, configuration…) to a UI
+  handler the embedder supplies.
+- Proven: an extension reads `activeTextEditor.document.getText()`, inspects
+  `lineAt`/`lineCount`, and `edit()`s the buffer — the change lands in the Rust
+  `Document`.
+
 ### Extension-compatibility coverage (be realistic)
-This is a **working foundation, not full parity**. Simple and medium extensions
-that register commands, show UI, read configuration and contribute languages/
-themes/snippets will activate and run. Not yet implemented (extensions using
-these will hit no-op stubs or need work): live `TextDocument`/`TextEditor`
-editing APIs wired to the buffer, calling registered completion/hover/definition
-providers from the editor, webviews, debug adapter protocol, tasks, the
-`workspace.fs` filesystem API, the testing API, notebooks, synchronous
-`getConfiguration().get` backed by real settings, and ESM-only extensions.
-Reaching broad compatibility is incremental along this same architecture.
+This is a **working foundation, not full parity**. Extensions that register
+commands, show UI, read configuration, contribute languages/themes/snippets,
+and **read/edit the active document** will activate and run. Implemented
+`vscode` surface now includes `TextDocument` (getText/lineAt/positionAt/
+offsetAt/getWordRangeAtPosition), `TextEditor.edit`, `window.activeTextEditor`,
+and `workspace.textDocuments`/`openTextDocument`. Not yet implemented
+(extensions using these hit no-op stubs or need work): calling registered
+completion/hover/definition providers from the editor, `WorkspaceEdit` across
+files, webviews, debug adapter protocol, tasks, the `workspace.fs` filesystem
+API, the testing API, notebooks, synchronous `getConfiguration().get` backed by
+real settings, and ESM-only extensions. Reaching broad compatibility is
+incremental along this same architecture.
 
 ## Deferred / environment notes
 - The GPUI shell is not compiled by the headless CI here (no GPU/display). Its

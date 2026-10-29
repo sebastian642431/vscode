@@ -28,6 +28,7 @@ editor-rs/
 │   ├── editor-lsp       Language Server Protocol client
 │   ├── editor-vscode    load VS Code themes / snippets / lang-config / keybindings
 │   ├── editor-ext       VS Code extension host (Node.js + vscode.* shim)
+│   ├── editor-workbench integration: extensions read/edit real documents
 │   └── editor-ui        keymap, command palette, tabs, workspace model + CLI
 └── gpui-frontend/       the GPUI desktop window (excluded from the workspace)
 ```
@@ -41,6 +42,7 @@ editor-rs/
 | `editor-lsp` | LSP client: lifecycle, encoding negotiation, incremental sync, completion/definition/hover, diagnostics | [`lsp-types`], `editor-rpc` |
 | `editor-vscode` | Load VS Code color themes, snippets, `language-configuration.json`, keybindings (JSONC) | `serde_json` |
 | `editor-ext` | VS Code extension host: spawn Node, `vscode.*` shim, load/activate extensions, VSIX/Open VSX | `editor-rpc`, [`zip`] |
+| `editor-workbench` | Integration: documents + host wired so extensions read/edit real `editor-core` buffers via the `vscode` API | `editor-core`, `editor-ext` |
 | `editor-ui` | JSON keybindings (with chords + `when`), fuzzy command palette, tabs, the `Workspace` brain, and a headless CLI | the editor crates above, `serde` |
 
 Data flows one way on each keystroke:
@@ -141,7 +143,9 @@ repo's real VS Code assets.
 **Stage 4 — extension host** — spawn Node.js, inject a `vscode` module shim,
 and **load/activate real VS Code extensions**, run the commands they register,
 and service their `vscode.*` calls back in the editor. Install from `.vsix`;
-Open VSX URL builders included.
+Open VSX URL builders included. The `editor-workbench` crate wires documents to
+the host so an extension can **read and edit the real editor-core buffer**
+through `TextDocument`/`TextEditor` (with correct UTF-16↔char conversion).
 
 > Extension compatibility is a **working foundation, not full parity yet** —
 > simple-to-medium extensions (commands, UI, configuration, static

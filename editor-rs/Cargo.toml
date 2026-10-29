@@ -9,6 +9,7 @@ members = [
     "crates/editor-vscode",
     "crates/editor-ext",
     "crates/editor-ui",
+    "crates/editor-workbench",
 ]
 
 # The GPUI-backed desktop UI (`editor-ui` with `--features gpui`) is NOT part of
@@ -24,6 +25,7 @@ default-members = [
     "crates/editor-vscode",
     "crates/editor-ext",
     "crates/editor-ui",
+    "crates/editor-workbench",
 ]
 
 # The GPUI rendering shell lives in its own crate, excluded from the workspace
@@ -85,6 +87,7 @@ editor-syntax = { path = "crates/editor-syntax" }
 editor-lsp = { path = "crates/editor-lsp" }
 editor-vscode = { path = "crates/editor-vscode" }
 editor-ext = { path = "crates/editor-ext" }
+editor-workbench = { path = "crates/editor-workbench" }
 
 [profile.release]
 opt-level = 3

@@ -154,6 +154,46 @@ impl Document {
 
     // ----- editing -----------------------------------------------------------
 
+    /// Apply a single explicit edit to the char range `range`, replacing it
+    /// with `text`. This is the *programmatic* edit path used by formatters,
+    /// the LSP layer and extensions (`TextEditor.edit`, `WorkspaceEdit`) — it
+    /// does not go through the cursors. Existing selections are shifted to
+    /// follow the edit, the change is recorded for undo, and the version bumps.
+    pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        let before = self.selections.clone();
+        let len = self.buffer.len_chars();
+        let start = range.start.min(len);
+        let old_end = range.end.min(len).max(start);
+
+        let change = self.buffer.replace(start..old_end, text);
+        let inserted = text.chars().count();
+        let delta = inserted as isize - (old_end - start) as isize;
+
+        // Shift each selection endpoint around the edit.
+        let adjust = move |pos: usize| -> usize {
+            if pos <= start {
+                pos
+            } else if pos >= old_end {
+                (pos as isize + delta) as usize
+            } else {
+                // Inside the replaced region: collapse to the end of the insert.
+                start + inserted
+            }
+        };
+        self.selections
+            .map(|s| Selection::new(adjust(s.anchor), adjust(s.head)));
+
+        self.recent_changes.push(change.clone());
+        self.version += 1;
+        self.history.break_coalescing();
+        self.history.push(Transaction {
+            changes: vec![change],
+            selections_before: before,
+            selections_after: self.selections.clone(),
+        });
+        self.vertical_goal = None;
+    }
+
     /// Insert `text` at every selection, replacing any selected text, then
     /// collapse each selection to a caret after the inserted text. Single
     /// characters coalesce in the undo history into word-sized steps.
@@ -767,6 +807,32 @@ mod tests {
         doc.set_caret(Point::new(0, 5));
         doc.paste(&clip);
         assert_eq!(doc.text(), "hellohello");
+    }
+
+    #[test]
+    fn programmatic_edit_shifts_selections_and_records_undo() {
+        let mut doc = Document::from_str("let x = 1;");
+        // A caret after the "1" (offset 9).
+        doc.set_caret(Point::new(0, 9));
+        // Rename `x` -> `count` (chars 4..5).
+        doc.edit(4..5, "count");
+        assert_eq!(doc.text(), "let count = 1;");
+        // The caret shifted right by the +4 delta.
+        assert_eq!(doc.selections().primary().head, 13);
+        // And it's undoable as one step.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "let x = 1;");
+    }
+
+    #[test]
+    fn programmatic_edit_emits_change_for_workers() {
+        let mut doc = Document::from_str("abc");
+        doc.edit(1..2, "XYZ");
+        assert_eq!(doc.text(), "aXYZc");
+        let changes = doc.drain_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].removed, "b");
+        assert_eq!(changes[0].inserted, "XYZ");
     }
 
     #[test]

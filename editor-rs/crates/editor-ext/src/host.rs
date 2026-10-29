@@ -41,6 +41,19 @@ pub enum MessageLevel {
     Error,
 }
 
+/// One edit from `TextEditor.edit` / `WorkspaceEdit`, in LSP-style
+/// `(line, character)` positions. `character` is a UTF-16 code-unit offset (how
+/// JS, and thus the Node mirror, measures columns); the editor converts it to a
+/// char offset against the document's rope when applying.
+#[derive(Clone, Debug)]
+pub struct RangeEdit {
+    pub start_line: u32,
+    pub start_character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+    pub text: String,
+}
+
 /// What the editor must provide so the extension's `vscode.*` calls do
 /// something. Every method has a no-op default, so a minimal editor only
 /// implements what it supports. Called on the host's pump thread.
@@ -91,6 +104,22 @@ pub trait HostHandler: Send {
     fn log(&mut self, message: &str) {
         let _ = message;
     }
+
+    /// `TextEditor.edit` / `workspace.applyEdit`: apply `edits` to the document
+    /// identified by `uri` and return the edited document's new full text and
+    /// version so the Node mirror can resync. Return `None` if the document is
+    /// unknown or the edit could not be applied.
+    fn apply_edits(&mut self, uri: &str, edits: &[RangeEdit]) -> Option<EditOutcome> {
+        let _ = (uri, edits);
+        None
+    }
+}
+
+/// The result of applying edits to a document.
+#[derive(Clone, Debug)]
+pub struct EditOutcome {
+    pub version: i64,
+    pub text: String,
 }
 
 /// A no-op handler (useful as a base or for headless runs).
@@ -184,6 +213,44 @@ impl ExtensionHost {
     pub fn deactivate(&self) -> editor_rpc::Result<()> {
         self.conn.notify("deactivate", Value::Null)
     }
+
+    // ----- document sync (editor -> extension host) --------------------------
+
+    /// Tell the host a document opened; it mirrors the text so the extension's
+    /// `TextDocument` APIs (`getText`, `lineAt`, …) answer synchronously.
+    pub fn open_document(
+        &self,
+        uri: &str,
+        language_id: &str,
+        version: i64,
+        text: &str,
+    ) -> editor_rpc::Result<()> {
+        self.conn.notify(
+            "document.open",
+            json!({ "uri": uri, "languageId": language_id, "version": version, "text": text }),
+        )
+    }
+
+    /// Tell the host a document's full text changed (keeps the mirror in sync
+    /// with editor-side edits such as the user typing).
+    pub fn change_document(&self, uri: &str, version: i64, text: &str) -> editor_rpc::Result<()> {
+        self.conn.notify(
+            "document.change",
+            json!({ "uri": uri, "version": version, "text": text }),
+        )
+    }
+
+    pub fn close_document(&self, uri: &str) -> editor_rpc::Result<()> {
+        self.conn
+            .notify("document.close", json!({ "uri": uri }))
+    }
+
+    /// Set (or clear, with `None`) the active editor the extension sees via
+    /// `window.activeTextEditor`.
+    pub fn set_active_editor(&self, uri: Option<&str>) -> editor_rpc::Result<()> {
+        self.conn
+            .notify("editor.setActive", json!({ "uri": uri }))
+    }
 }
 
 impl Drop for ExtensionHost {
@@ -262,8 +329,41 @@ fn dispatch_request(
                 .unwrap_or_default();
             h.execute_builtin(command, &args)
         }
+        "editor.applyEdits" => {
+            let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+            let edits = parse_edits(params.get("edits"));
+            match h.apply_edits(uri, &edits) {
+                Some(outcome) => json!({
+                    "applied": true,
+                    "version": outcome.version,
+                    "text": outcome.text,
+                }),
+                None => json!({ "applied": false }),
+            }
+        }
         _ => Value::Null,
     }
+}
+
+fn parse_edits(value: Option<&Value>) -> Vec<RangeEdit> {
+    value
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|e| RangeEdit {
+                    start_line: u32_at(e, "startLine"),
+                    start_character: u32_at(e, "startCharacter"),
+                    end_line: u32_at(e, "endLine"),
+                    end_character: u32_at(e, "endCharacter"),
+                    text: e.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn u32_at(v: &Value, key: &str) -> u32 {
+    v.get(key).and_then(Value::as_u64).unwrap_or(0) as u32
 }
 
 fn dispatch_notification(handler: &Arc<Mutex<dyn HostHandler>>, method: &str, params: &Value) {

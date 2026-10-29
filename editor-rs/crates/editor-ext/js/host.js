@@ -108,13 +108,28 @@ async function onMessage(msg) {
   }
 }
 
-function handleNotification(method, _params) {
+function handleNotification(method, params) {
   switch (method) {
     case 'shutdown':
       process.exit(0);
       break;
     case 'deactivate':
       deactivateAll();
+      break;
+    case 'document.open':
+      documents.set(params.uri, new TextDocument(params.uri, params.languageId, params.version, params.text));
+      break;
+    case 'document.change': {
+      const doc = documents.get(params.uri);
+      if (doc) doc._reset(params.version, params.text);
+      break;
+    }
+    case 'document.close':
+      documents.delete(params.uri);
+      if (activeEditorUri === params.uri) activeEditorUri = null;
+      break;
+    case 'editor.setActive':
+      activeEditorUri = params.uri || null;
       break;
   }
 }
@@ -137,6 +152,8 @@ async function handleRequest(method, params) {
 const commandMap = new Map(); // id -> { cb, thisArg }
 const providers = { completion: [], hover: [], definition: [], codeAction: [] };
 const activeExtensions = new Map(); // id -> { mod, ctx }
+const documents = new Map(); // uri -> TextDocument
+let activeEditorUri = null;
 
 function makeDisposable(fn) {
   return { dispose: typeof fn === 'function' ? fn : () => {} };
@@ -210,6 +227,144 @@ class Location {
     this.uri = uri;
     this.range = rangeOrPos;
   }
+}
+
+// A mirror of a document the editor opened. Columns/offsets are UTF-16 code
+// units (JS string indices), matching VS Code's API.
+class TextDocument {
+  constructor(uri, languageId, version, text) {
+    this.uri = typeof uri === 'string' ? Uri.parse(uri) : uri;
+    this._uriString = typeof uri === 'string' ? uri : uri.toString();
+    this.languageId = languageId || 'plaintext';
+    this.version = version || 0;
+    this._reset(this.version, text || '');
+  }
+  _reset(version, text) {
+    this.version = version;
+    this._text = text;
+    // Precompute line start offsets.
+    this._lineStarts = [0];
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 /* \n */) this._lineStarts.push(i + 1);
+    }
+  }
+  get fileName() {
+    return this.uri.fsPath;
+  }
+  get isUntitled() {
+    return this.uri.scheme === 'untitled';
+  }
+  get isDirty() {
+    return false;
+  }
+  get eol() {
+    return 1; // LF
+  }
+  get lineCount() {
+    return this._lineStarts.length;
+  }
+  getText(range) {
+    if (!range) return this._text;
+    const s = this.offsetAt(range.start);
+    const e = this.offsetAt(range.end);
+    return this._text.slice(s, e);
+  }
+  offsetAt(position) {
+    const line = Math.max(0, Math.min(position.line, this._lineStarts.length - 1));
+    const lineStart = this._lineStarts[line];
+    const lineEnd =
+      line + 1 < this._lineStarts.length ? this._lineStarts[line + 1] : this._text.length;
+    return Math.min(lineStart + position.character, lineEnd);
+  }
+  positionAt(offset) {
+    offset = Math.max(0, Math.min(offset, this._text.length));
+    // Binary search the line.
+    let lo = 0;
+    let hi = this._lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this._lineStarts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return new Position(lo, offset - this._lineStarts[lo]);
+  }
+  lineAt(lineOrPos) {
+    const line = typeof lineOrPos === 'number' ? lineOrPos : lineOrPos.line;
+    const start = this._lineStarts[line];
+    const end = line + 1 < this._lineStarts.length ? this._lineStarts[line + 1] : this._text.length;
+    let text = this._text.slice(start, end);
+    text = text.replace(/\r?\n$/, '');
+    const firstNon = text.search(/\S/);
+    return {
+      lineNumber: line,
+      text: text,
+      range: new Range(new Position(line, 0), new Position(line, text.length)),
+      rangeIncludingLineBreak: new Range(new Position(line, 0), new Position(line, end - start)),
+      firstNonWhitespaceCharacterIndex: firstNon < 0 ? text.length : firstNon,
+      isEmptyOrWhitespace: text.trim().length === 0,
+    };
+  }
+  getWordRangeAtPosition(position, regexp) {
+    const re = regexp || /[A-Za-z0-9_]+/g;
+    const lineText = this.lineAt(position.line).text;
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(lineText)) !== null) {
+      const start = m.index;
+      const end = m.index + m[0].length;
+      if (position.character >= start && position.character <= end) {
+        return new Range(new Position(position.line, start), new Position(position.line, end));
+      }
+      if (m.index > position.character) break;
+    }
+    return undefined;
+  }
+  save() {
+    return Promise.resolve(true);
+  }
+}
+
+class TextEditor {
+  constructor(doc) {
+    this.document = doc;
+    const zero = new Position(0, 0);
+    this.selection = new Selection(zero, zero);
+    this.selections = [this.selection];
+    this.options = { tabSize: 4, insertSpaces: true };
+    this.viewColumn = 1;
+  }
+  edit(callback) {
+    const edits = [];
+    const builder = {
+      replace: (range, text) => edits.push(rangeEditOf(range, text)),
+      insert: (position, text) => edits.push(rangeEditOf(new Range(position, position), text)),
+      delete: (range) => edits.push(rangeEditOf(range, '')),
+      setEndOfLine: () => {},
+    };
+    callback(builder);
+    return requestRust('editor.applyEdits', {
+      uri: this.document._uriString,
+      edits: edits,
+    }).then((res) => {
+      if (res && res.applied) {
+        this.document._reset(res.version, res.text);
+        return true;
+      }
+      return false;
+    });
+  }
+  revealRange() {}
+  setDecorations() {}
+}
+
+function rangeEditOf(range, text) {
+  return {
+    startLine: range.start.line,
+    startCharacter: range.start.character,
+    endLine: range.end.line,
+    endCharacter: range.end.character,
+    text: text || '',
+  };
 }
 
 class Uri {
@@ -485,7 +640,6 @@ const vscode = {
     createTextEditorDecorationType: () => ({ dispose() {} }),
     withProgress: (_opts, task) =>
       Promise.resolve(task({ report() {} }, { isCancellationRequested: false })),
-    activeTextEditor: undefined,
     visibleTextEditors: [],
     onDidChangeActiveTextEditor: new EventEmitter().event,
     onDidChangeTextEditorSelection: new EventEmitter().event,
@@ -567,6 +721,40 @@ const vscode = {
     all: [],
     onDidChange: new EventEmitter().event,
   },
+};
+
+// Live views over the document mirror / active editor.
+const editors = new Map(); // uri -> TextEditor
+function editorFor(uri) {
+  const doc = documents.get(uri);
+  if (!doc) return undefined;
+  let ed = editors.get(uri);
+  if (!ed) {
+    ed = new TextEditor(doc);
+    editors.set(uri, ed);
+  } else {
+    ed.document = doc;
+  }
+  return ed;
+}
+Object.defineProperty(vscode.window, 'activeTextEditor', {
+  get() {
+    return activeEditorUri ? editorFor(activeEditorUri) : undefined;
+  },
+});
+Object.defineProperty(vscode.workspace, 'textDocuments', {
+  get() {
+    return Array.from(documents.values());
+  },
+});
+vscode.workspace.openTextDocument = function (uriOrOptions) {
+  let key;
+  if (typeof uriOrOptions === 'string') key = Uri.file(uriOrOptions).toString();
+  else if (uriOrOptions && uriOrOptions.toString) key = uriOrOptions.toString();
+  const existing = key && documents.get(key);
+  if (existing) return Promise.resolve(existing);
+  // Unknown document: hand back an empty in-memory mirror.
+  return Promise.resolve(new TextDocument(key || 'untitled:Untitled', 'plaintext', 1, ''));
 };
 
 // ---------------------------------------------------------------- require hook
