@@ -2,6 +2,25 @@
 name = "editor-syntax"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Incremental tree-sitter parsing and syntax highlighting for editor-rs, fed by editor-core's Change stream."
 
 [dependencies]
+editor-core.workspace = true
+ropey.workspace = true
+tree-sitter.workspace = true
+tree-sitter-highlight.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-python.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "parse_bench"
+harness = false

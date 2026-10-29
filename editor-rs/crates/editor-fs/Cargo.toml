@@ -2,6 +2,24 @@
 name = "editor-fs"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "File-tree walking, file-system watching and ripgrep-powered project search for editor-rs, all designed to run off the UI thread."
 
 [dependencies]
+ignore.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+grep-matcher.workspace = true
+notify.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile = "3"
+
+[[bench]]
+name = "search_bench"
+harness = false
